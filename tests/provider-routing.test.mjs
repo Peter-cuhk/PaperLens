@@ -30,3 +30,16 @@ test("falls back from CloudBase Hy3 to MiMo without retrying explicit cancellati
   assert.equal(shouldFallbackToMiMo("mimo", "upstream_unavailable", { mimo: true }), false);
   assert.equal(shouldFallbackToMiMo("cloudbase-hunyuan", "upstream_unavailable", { mimo: false }), false);
 });
+
+test("keeps ChatGPT Web for chat but routes translation and terms to MiMo", () => {
+  const chat = resolveProviderRoute({ mode: "chat", question: "解释选中段落" }, "chatgpt-web", { "chatgpt-web": true, mimo: true });
+  assert.equal(chat.provider, "chatgpt-web");
+
+  const translation = resolveProviderRoute({ mode: "translate", pageText: "paper" }, "chatgpt-web", { "chatgpt-web": true, mimo: true });
+  assert.equal(translation.provider, "mimo");
+  assert.match(translation.fallbackReason, /只用于问答/);
+
+  const terms = resolveProviderRoute({ mode: "terms", pageText: "paper" }, "chatgpt-web", { "chatgpt-web": true, mimo: false });
+  assert.equal(terms.provider, "chatgpt-web");
+  assert.match(terms.unsupportedReason, /请先配置 MiMo/);
+});

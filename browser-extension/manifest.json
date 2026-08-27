@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "PaperLens ChatGPT Web Bridge",
+  "version": "0.1.0",
+  "description": "Experimental local bridge between PaperLens and a visible signed-in ChatGPT web chat.",
+  "permissions": ["tabs"],
+  "host_permissions": ["https://chatgpt.com/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://chatgpt.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "PaperLens ChatGPT Web Bridge"
+  }
+}

@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "bridge": "node bridge/server.mjs",
+    "chatgpt-web:setup": "./scripts/open-chatgpt-web-setup.sh",
     "build": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext build",
     "start": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start",
     "test": "npm run build && node --test tests/*.test.mjs",
@@ -18,6 +19,7 @@
   "dependencies": {
     "@ant-design/icons": "^6.3.2",
     "@cloudbase/node-sdk": "^3.18.3",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "drizzle-orm": "0.45.2",
     "katex": "^0.18.1",
     "next": "^16.2.12",
@@ -28,7 +30,8 @@
     "react-markdown": "^10.1.0",
     "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.1",
-    "remark-math": "^6.0.0"
+    "remark-math": "^6.0.0",
+    "ws": "^8.21.3"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.37.1",
@@ -37,6 +40,7 @@
     "@types/node": "22.19.19",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
+    "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "6.0.2",
     "@vitejs/plugin-rsc": "0.5.26",
     "drizzle-kit": "0.31.10",

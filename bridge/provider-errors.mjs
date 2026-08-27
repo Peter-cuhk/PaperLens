@@ -16,7 +16,7 @@ export function normalizeProviderError(error, provider = "unknown") {
   const rawCode = String(error?.code || error?.error?.code || "").toLowerCase();
   const rawMessage = error instanceof Error ? error.message : String(error || "");
   const message = rawMessage.toLowerCase();
-  const serviceName = provider === "mimo" ? "MiMo API" : provider === "openai" ? "OpenAI API" : provider === "cloudbase-hunyuan" ? "CloudBase Hy3" : "AI 服务";
+  const serviceName = provider === "mimo" ? "MiMo API" : provider === "openai" ? "OpenAI API" : provider === "cloudbase-hunyuan" ? "CloudBase Hy3" : provider === "chatgpt-web" ? "ChatGPT 网页" : "AI 服务";
 
   if (error?.name === "AbortError" || message.includes("aborted")) {
     return new ProviderError("请求已取消", { code: "request_aborted", status: 499, provider, cause: error });

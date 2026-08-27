@@ -15,7 +15,7 @@ PaperLens 希望把“阅读原文、查看译文、理解概念、引用图表�
 - **精确上下文选择**：单击引用整段，拖选则只引用实际选中的文字和行。
 - **公式渲染与解释**：译文和 AI Chat 均使用 KaTeX；无法可靠恢复的 PDF 公式会提示以左侧原文为准，不猜测残缺公式。
 - **图片与图表上下文**：自动检测带 Figure/Fig. 图注的图片区域，点击即可截取整图加入 AI Chat；聊天输入框也支持 `Command-V` 粘贴截图。
-- **可选 AI Provider**：在界面中切换本机 Codex、腾讯 CloudBase 混元、Xiaomi MiMo 和 OpenAI，并分别选择翻译/问答模型。
+- **可选 AI Provider**：在界面中切换本机 Codex、实验性 ChatGPT 网页问答、腾讯 CloudBase 混元、Xiaomi MiMo 和 OpenAI，并分别选择翻译/问答模型。
 - **资料上下文问答**：当前 Provider 结合页面、选区、图片和最近对话回答，并显示实际路由、模型、耗时与 token 用量。
 - **跨资料 `@` 引用**：在 AI Chat 输入 `@` 搜索“我的空间”；明确引用单篇资料时会携带所有可提取文字页与页码，引用文件夹时则在整个文件夹内按问题检索证据。
 - **论文仓库核实模式**：当论文或课程材料中检测到代码仓库后，代码实现类问题会要求核实 GitHub、alphaXiv 或实时来源，避免按经验臆测接口。
@@ -37,10 +37,13 @@ flowchart LR
   Bridge --> Hunyuan["CloudBase 混元 hy3"]
   Bridge --> MiMo["Xiaomi MiMo Chat Completions"]
   Bridge --> OpenAI["OpenAI Responses API"]
+  Bridge --> WebMCP["本地 MCP 浏览器桥"]
+  WebMCP --> ChatGPTWeb["已登录的 ChatGPT 网页 Chat"]
   Codex --> UI
   Hunyuan --> UI
   MiMo --> UI
   OpenAI --> UI
+  ChatGPTWeb --> UI
 ```
 
 PaperLens 是 **local-first**，但不是完全离线工具：PDF 由浏览器本地读取；Word/PPT 只传给 `127.0.0.1` 上的本机 bridge，转换临时目录会立即清理。当你主动翻译或提问时，相关页面文字、选区或图片才会交给所选 Provider。
@@ -112,9 +115,28 @@ OPENAI_API_KEY=
 PAPERLENS_OPENAI_TRANSLATION_MODEL=gpt-5.6-terra
 PAPERLENS_OPENAI_CHAT_MODEL=gpt-5.6-terra
 PAPERLENS_OPENAI_REASONING_EFFORT=low
+
+# 实验性 ChatGPT 网页问答（需要加载 browser-extension/）
+PAPERLENS_CHATGPT_WEB_ENABLED=1
+PAPERLENS_CHATGPT_WEB_PORT=43124
+PAPERLENS_CHATGPT_WEB_TIMEOUT_MS=240000
 ```
 
 重启 `npm run dev` 后，在右上角“AI 服务设置”中选择 Provider、模型并点击“测试当前服务”。混元暂时不可用、配额用尽或页面含图片时，服务会自动改用 MiMo，而不是只展示报错。代码实现或仓库核实问题在本机 Codex 可用时会回退到 Codex。
+
+### 实验性 ChatGPT 网页问答
+
+这条路线只用于 AI Chat，不用于翻译或术语提取；选择它时，翻译与术语任务仍会交给 MiMo。它由三个本地组件组成：PaperLens bridge 是 MCP Client，`bridge/chatgpt-web-mcp.mjs` 提供 MCP 工具，`browser-extension/` 在用户已经登录的 ChatGPT 网页中发送问题并读取页面可见的最终回答。扩展不读取 Cookie、密码或浏览器存储，也不调用 ChatGPT 私有接口。
+
+首次连接：
+
+```bash
+npm run chatgpt-web:setup
+```
+
+Chrome 会打开扩展管理页和 `browser-extension/` 文件夹。打开“开发者模式”，点击“加载已解压的扩展程序”，选择该文件夹，然后打开并登录 [chatgpt.com](https://chatgpt.com/)。回到 PaperLens 的“AI 服务设置”，选择“ChatGPT 网页 · 实验”并点击“测试当前服务”。
+
+当前版本是本地实验通道：ChatGPT 页面结构变化、登录确认或验证码都可能要求人工处理。它不会共享账号；每台电脑只使用该用户自己浏览器里的登录会话。
 
 线上登录、余额、计费和 CloudBase 部署由独立的 [PaperLens-Cloud](https://github.com/Peter-cuhk/PaperLens-Cloud) 仓库维护；本仓库不包含线上发布入口。
 
@@ -155,6 +177,7 @@ PAPERLENS_OPENAI_REASONING_EFFORT=low
 
 - AI bridge 只监听 `127.0.0.1`，不会直接暴露到局域网或 iPad。
 - bridge 只接受 PaperLens 本地来源；调用 Codex 时使用只读 sandbox。
+- ChatGPT 网页 MCP 与扩展通道只监听 `127.0.0.1:43124`；扩展只操作可见的 ChatGPT 输入框和回答，不读取 Cookie、密码或浏览器存储。
 - API Key 仅从服务端 `.env` / 环境变量读取；界面只保存 Provider、模型和推理强度，绝不保存密钥。
 - 本地粘贴图片仅接受 PNG、JPEG 和 WebP。
 - 仓库实现问题要求真实来源证据；来源不可用时应明确停止，而不是补猜实现。
@@ -177,6 +200,9 @@ bridge/
   providers/cloudbase-hunyuan.mjs # CloudBase Node SDK / 混元 hy3 Adapter
   providers/openai.mjs      # OpenAI Responses API Adapter
   providers/mimo.mjs        # Xiaomi MiMo Chat Completions Adapter
+  providers/chatgpt-web.mjs # MCP Client / ChatGPT 网页实验 Adapter
+  chatgpt-web-mcp.mjs       # 本地 MCP Server 与扩展 WebSocket 通道
+browser-extension/          # 在可见 ChatGPT 网页中发送并提取回答
 scripts/
   dev.mjs                   # 同时启动 Web、bridge 与 USB gateway
   usb-gateway.mjs           # iPad USB link-local 转发

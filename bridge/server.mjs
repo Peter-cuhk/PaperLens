@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { ProviderError, normalizeProviderError } from "./provider-errors.mjs";
 import { INVOCATION_MODES, PROVIDER_IDS, resolveProviderRoute, shouldFallbackToMiMo } from "./provider-routing.mjs";
 import { createCloudBaseHunyuanProvider } from "./providers/cloudbase-hunyuan.mjs";
+import { createChatGPTWebProvider } from "./providers/chatgpt-web.mjs";
 import { createMiMoProvider } from "./providers/mimo.mjs";
 import { createOpenAIProvider } from "./providers/openai.mjs";
 import { createDocumentConverter, DocumentConversionError } from "./document-converter.mjs";
@@ -49,6 +50,7 @@ for (const candidate of CODEX_CANDIDATES) {
 const openAIProvider = createOpenAIProvider();
 const cloudBaseHunyuanProvider = createCloudBaseHunyuanProvider();
 const mimoProvider = createMiMoProvider();
+const chatGPTWebProvider = createChatGPTWebProvider();
 const documentConverter = await createDocumentConverter();
 
 try {
@@ -249,7 +251,7 @@ function buildPrompt(payload) {
   if (!question) throw new Error("请输入问题");
   const common = [
     "Use $paper-reader in explanation mode unless this is a repository implementation question.",
-    "你是运行在 PaperLens 学习资料阅读工作台里的本机 Codex。请用简体中文回答，先给直接结论，再解释依据。不要假装看过没有提供或没有查到的内容。",
+    "你是运行在 PaperLens 学习资料阅读工作台里的 AI 阅读助手。请用简体中文回答，先给直接结论，再解释依据。不要假装看过没有提供或没有查到的内容。",
     "公式输出规则：回答中的每一个数学公式都必须写成有效 LaTeX；行内公式使用 \\( ... \\)，独立公式使用 \\[ ... \\]。不要在分隔符外裸露下划线、花括号或 \\prod、\\sum 等 LaTeX 命令，也不要把公式放进 Markdown 代码围栏。对公式的解释要说明它表达的关系、主要变量以及上下标或求和/乘积范围；当前上下文没有定义的符号要明确指出，禁止猜测。",
     repairError ? `上一次 AI 任务失败：${repairError}。请诊断原因，修复后完成用户原始任务，不要只复述错误。` : "",
     `资料：${paperTitle || "本地资料"}`,
@@ -424,6 +426,17 @@ function providerHealth() {
       models: mimoProvider.models,
       allowedModels: mimoProvider.allowedModels,
     },
+    "chatgpt-web": {
+      id: "chatgpt-web",
+      label: chatGPTWebProvider.label,
+      configured: chatGPTWebProvider.configured,
+      available: chatGPTWebProvider.available,
+      busy: activity("chatgpt-web").total > 0,
+      activeTasks: activity("chatgpt-web").channels,
+      capabilities: chatGPTWebProvider.capabilities,
+      models: chatGPTWebProvider.models,
+      allowedModels: chatGPTWebProvider.allowedModels,
+    },
   };
 }
 
@@ -441,6 +454,9 @@ function normalizeModel(value, fallback, allowedModels) {
 }
 
 async function invokeProvider(providerId, payload, requestOptions) {
+  if (providerId === "chatgpt-web") {
+    return chatGPTWebProvider.invoke(payload, { prompt: buildPrompt(payload), signal: requestOptions.signal });
+  }
   if (providerId === "cloudbase-hunyuan") {
     const model = normalizeModel(
       payload.mode === "translate" || payload.mode === "terms" ? requestOptions.translationModel : requestOptions.chatModel,
@@ -485,6 +501,7 @@ const server = createServer(async (request, response) => {
     return;
   }
   if (request.method === "GET" && request.url === "/health") {
+    await chatGPTWebProvider.refreshStatus();
     sendJson(response, 200, {
       ok: true,
       service: "PaperLens AI bridge",
@@ -531,6 +548,9 @@ const server = createServer(async (request, response) => {
         sendJson(response, 200, { ...result, provider: providerId }, origin);
       } else if (providerId === "mimo") {
         const result = await mimoProvider.testConnection();
+        sendJson(response, 200, { ...result, provider: providerId }, origin);
+      } else if (providerId === "chatgpt-web") {
+        const result = await chatGPTWebProvider.testConnection();
         sendJson(response, 200, { ...result, provider: providerId }, origin);
       } else if (codexAvailable) {
         sendJson(response, 200, { ok: true, provider: providerId, skillAvailable }, origin);
