@@ -1,19 +1,17 @@
 property paperLensURL : "http://localhost:3000/"
 
 on run
-	set projectPath to "/Users/peterxie/Desktop/论文阅读器"
+	set projectPath to "__PROJECT_PATH__"
+	set nodePath to "__NODE_PATH__"
 	set logDirectory to POSIX path of (path to library folder from user domain) & "Logs/PaperLens"
 	set executablePath to "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 	
 	set launchScript to "PATH=" & quoted form of executablePath & "; export PATH; " & ¬
 		"project=" & quoted form of projectPath & "; logs=" & quoted form of logDirectory & "; " & ¬
 		"/bin/mkdir -p \"$logs\"; cd \"$project\"; " & ¬
-		"if ! /usr/bin/nc -z -w 1 127.0.0.1 43123 >/dev/null 2>&1; then " & ¬
-		"nohup /opt/homebrew/bin/node \"$project/bridge/server.mjs\" >>\"$logs/bridge.log\" 2>&1 </dev/null & " & ¬
-		"fi; " & ¬
-		"if ! /usr/bin/nc -z -w 1 ::1 3000 >/dev/null 2>&1 && ! /usr/bin/nc -z -w 1 127.0.0.1 3000 >/dev/null 2>&1; then " & ¬
-		"nohup \"$project/node_modules/.bin/vinext\" dev --hostname localhost >>\"$logs/web.log\" 2>&1 </dev/null & " & ¬
-		"fi"
+			"if ! /usr/bin/nc -z -w 1 127.0.0.1 43123 >/dev/null 2>&1 && ! /usr/bin/nc -z -w 1 ::1 3000 >/dev/null 2>&1 && ! /usr/bin/nc -z -w 1 127.0.0.1 3000 >/dev/null 2>&1; then " & ¬
+			"nohup " & quoted form of nodePath & " \"$project/scripts/dev.mjs\" >>\"$logs/paperlens.log\" 2>&1 </dev/null & " & ¬
+			"fi"
 	
 	try
 		do shell script launchScript

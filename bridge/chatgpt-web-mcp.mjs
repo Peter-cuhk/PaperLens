@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { WebSocket, WebSocketServer } from "ws";
@@ -7,6 +7,7 @@ import * as z from "zod/v4";
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.PAPERLENS_CHATGPT_WEB_PORT || 43124);
 const REQUEST_TIMEOUT_MS = Number(process.env.PAPERLENS_CHATGPT_WEB_TIMEOUT_MS || 240_000);
+const PAIRING_TOKEN = process.env.PAPERLENS_CHATGPT_WEB_TOKEN || "";
 
 let extensionSocket = null;
 let extensionState = { connected: false, signedIn: false, url: "" };
@@ -35,7 +36,7 @@ function extensionStatus() {
   };
 }
 
-function askExtension(prompt, signal) {
+function askExtension(prompt, images, signal) {
   return new Promise((resolve, reject) => {
     const requestId = randomUUID();
     const timer = setTimeout(() => {
@@ -66,7 +67,7 @@ function askExtension(prompt, signal) {
       },
     });
     try {
-      sendExtension({ type: "ask", requestId, prompt, timeoutMs: REQUEST_TIMEOUT_MS });
+      sendExtension({ type: "ask", requestId, prompt, images, timeoutMs: REQUEST_TIMEOUT_MS });
     } catch (error) {
       clearTimeout(timer);
       pendingRequests.delete(requestId);
@@ -80,9 +81,15 @@ const socketServer = new WebSocketServer({ host: HOST, port: PORT });
 socketServer.on("connection", (socket, request) => {
   const remoteAddress = request.socket.remoteAddress || "";
   const origin = request.headers.origin || "";
+  const suppliedToken = new URL(request.url || "/", `http://${HOST}`).searchParams.get("token") || "";
   const localClient = remoteAddress.includes("127.0.0.1") || remoteAddress === "::1";
   const paperLensExtension = /^chrome-extension:\/\/[a-p]{32}$/.test(origin);
-  if (!localClient || !paperLensExtension) {
+  const expectedBytes = Buffer.from(PAIRING_TOKEN);
+  const suppliedBytes = Buffer.from(suppliedToken);
+  const tokenMatches = expectedBytes.length > 0
+    && expectedBytes.length === suppliedBytes.length
+    && timingSafeEqual(expectedBytes, suppliedBytes);
+  if (!localClient || !paperLensExtension || !tokenMatches) {
     socket.close(1008, "PaperLens extension connections only");
     return;
   }
@@ -146,12 +153,16 @@ mcpServer.registerTool("ask_chatgpt_web", {
   description: "Send PaperLens document context and a question through the user's visible signed-in ChatGPT web chat and return the final visible answer.",
   inputSchema: {
     prompt: z.string().min(1).max(2_000_000),
+    images: z.array(z.object({
+      label: z.string().max(200),
+      dataUrl: z.string().max(20_000_000),
+    })).max(8).default([]),
   },
-}, async ({ prompt }, extra) => {
+}, async ({ prompt, images }, extra) => {
   const status = extensionStatus();
   if (!status.connected) throw new Error("PaperLens ChatGPT 浏览器扩展尚未连接");
   if (!status.signedIn) throw new Error("请先在浏览器中登录 ChatGPT");
-  const result = await askExtension(prompt, extra.signal);
+  const result = await askExtension(prompt, images, extra.signal);
   return {
     content: [{ type: "text", text: result.answer }],
     structuredContent: result,

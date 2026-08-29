@@ -35,7 +35,7 @@ import {
 } from "@ant-design/icons";
 import katex from "katex";
 import { type ChangeEvent as ReactChangeEvent, type ClipboardEvent as ReactClipboardEvent, type FormEvent as ReactFormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { isAbortError, runWithCodexRecovery } from "./ai-recovery";
+import { isAbortError, runWithProviderRecovery } from "./ai-recovery";
 import { ChatMarkdown } from "./chat-markdown";
 import { findClosestPageToViewportCenter, shouldRenderPage } from "./continuous-scroll";
 import { detectCaptionFigureRegions, refineFigureRegionsWithCanvas, type FigureRegion } from "./figure-regions";
@@ -107,8 +107,9 @@ type RightTab = "translation" | "outline" | "terms" | "notes";
 type MobileView = "paper" | "translation";
 type AnnotationMode = "select" | "highlight" | "comment" | "erase";
 type BridgeStatus = "checking" | "ready" | "offline";
-type AIProviderId = "local-codex" | "chatgpt-web" | "cloudbase-hunyuan" | "openai" | "mimo";
+type AIProviderId = "local-codex" | "chatgpt-web";
 type AIUsage = { inputTokens: number; outputTokens: number; totalTokens: number; cachedTokens: number; reasoningTokens: number };
+type CodexRateLimit = { id: string; name?: string | null; usedPercent?: number | null; remainingPercent?: number | null; windowDurationMins?: number | null; resetsAt?: number | null; reachedType?: string | null };
 type ProviderInfo = {
   id: AIProviderId;
   label: string;
@@ -119,6 +120,9 @@ type ProviderInfo = {
   allowedModels?: string[];
   models?: { translation: string; chat: string };
   reasoningEffort?: string;
+  pairingToken?: string;
+  installation?: { installed: boolean; command?: string; version?: string };
+  account?: { loggedIn: boolean; authMode?: string | null; email?: string | null; planType?: string | null; rateLimits?: CodexRateLimit[]; rateLimitReached?: boolean; limitedStatus?: boolean };
 };
 type ProviderMap = Partial<Record<AIProviderId, ProviderInfo>>;
 type AISettings = { provider: AIProviderId; translationModel: string; chatModel: string; reasoningEffort: string };
@@ -676,11 +680,8 @@ async function invokeAI(payload: Record<string, unknown>, settings: AISettings, 
   };
 }
 
-function providerDisplayName(provider: AIProviderId, model?: string) {
-  if (provider === "chatgpt-web") return "ChatGPT 网页 · 实验";
-  if (provider === "cloudbase-hunyuan") return `混元${model ? ` · ${model}` : " · CloudBase"}`;
-  if (provider === "openai") return `OpenAI${model ? ` · ${model}` : " API"}`;
-  if (provider === "mimo") return `MiMo${model ? ` · ${model}` : " API"}`;
+function providerDisplayName(provider: AIProviderId) {
+  if (provider === "chatgpt-web") return "ChatGPT 网页 Chat";
   return "本机 Codex";
 }
 
@@ -695,64 +696,75 @@ function AISettingsModal({
   bridgeStatus,
   skillAvailable,
   testStatus,
+  extensionStoreUrl,
   onSettingsChange,
   onClose,
   onRefresh,
   onTest,
+  onCodexLogin,
+  onCodexLogout,
+  onOpenExtensionSetup,
 }: {
   settings: AISettings;
   providers: ProviderMap;
   bridgeStatus: BridgeStatus;
   skillAvailable: boolean;
   testStatus: string;
+  extensionStoreUrl: string;
   onSettingsChange: (settings: AISettings) => void;
   onClose: () => void;
   onRefresh: () => void;
   onTest: () => void;
+  onCodexLogin: () => void;
+  onCodexLogout: () => void;
+  onOpenExtensionSetup: () => void;
 }) {
   const selected = providers[settings.provider];
   const status = bridgeStatus === "checking" ? "checking" : bridgeStatus === "offline" || !selected?.available ? "offline" : "ready";
-  const models = selected?.allowedModels?.length ? selected.allowedModels : settings.provider === "chatgpt-web" ? ["chatgpt-web"] : settings.provider === "cloudbase-hunyuan" ? ["hy3"] : settings.provider === "mimo" ? ["mimo-v2.5", "mimo-v2.5-pro"] : ["gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-sol"];
+  const codex = providers["local-codex"];
+  const codexInstalled = Boolean(codex?.installation?.installed);
+  const codexLoggedIn = Boolean(codex?.account?.loggedIn);
+  const codexRates = codex?.account?.rateLimits || [];
   return (
     <div className="modal-backdrop" onMouseDown={onClose}>
       <section className="modal ai-settings-modal" role="dialog" aria-modal="true" aria-labelledby="ai-settings-title" onMouseDown={(event) => event.stopPropagation()}>
         <button className="modal-close" onClick={onClose} aria-label="关闭"><CloseOutlined /></button>
-        <h2 id="ai-settings-title">AI 服务设置</h2>
-        <p>选择翻译和问答使用的服务。API Key 只从本机服务端环境变量读取，不会保存到浏览器。</p>
+        <h2 id="ai-settings-title">本地 AI 接入</h2>
+        <p>PaperLens 本地版只连接本机 Codex，或你浏览器里可见的 ChatGPT Chat；不接收 API Key，也没有余额、充值或支付入口。</p>
         <div className="provider-options" role="radiogroup" aria-label="AI Provider">
-          {(["local-codex", "chatgpt-web", "cloudbase-hunyuan", "mimo", "openai"] as AIProviderId[]).map((providerId) => {
+          {(["local-codex", "chatgpt-web"] as AIProviderId[]).map((providerId) => {
             const info = providers[providerId];
             const active = settings.provider === providerId;
             return (
               <button key={providerId} type="button" role="radio" aria-checked={active} className={`provider-option ${active ? "active" : ""}`} onClick={() => onSettingsChange({
                 ...settings,
                 provider: providerId,
-                ...(providerId === "chatgpt-web" ? { translationModel: "mimo-v2.5", chatModel: "chatgpt-web" } : providerId === "cloudbase-hunyuan" ? { translationModel: "hy3", chatModel: "hy3" } : providerId === "mimo" ? { translationModel: "mimo-v2.5", chatModel: "mimo-v2.5" } : providerId === "openai" ? { translationModel: "gpt-5.6-terra", chatModel: "gpt-5.6-terra" } : {}),
+                ...(providerId === "chatgpt-web" ? { translationModel: "chatgpt-web", chatModel: "chatgpt-web" } : {}),
               })}>
                 <span><RobotOutlined /></span>
-                <div><strong>{providerId === "local-codex" ? "本机 Codex" : providerId === "chatgpt-web" ? "ChatGPT 网页 · 实验" : providerId === "cloudbase-hunyuan" ? "腾讯混元 · CloudBase" : providerId === "mimo" ? "Xiaomi MiMo" : "OpenAI API"}</strong><small>{info?.available ? "可用" : providerId === "chatgpt-web" ? "浏览器扩展未连接" : providerId === "local-codex" ? "未检测到" : "未配置 API Key"}</small></div>
+                <div><strong>{providerId === "local-codex" ? "本机 Codex" : "ChatGPT 网页 Chat"}</strong><small>{info?.available ? "可用" : providerId === "chatgpt-web" ? "扩展或网页账号未连接" : !info?.installation?.installed ? "Codex CLI 未安装" : !info?.account?.loggedIn ? "Codex 已安装，账号未登录" : "当前额度窗口不可用"}</small></div>
                 <i>{active ? <CheckOutlined /> : null}</i>
               </button>
             );
           })}
         </div>
-        {settings.provider !== "local-codex" && settings.provider !== "chatgpt-web" && (
-          <div className="ai-model-settings">
-            <label>翻译模型<select value={settings.translationModel} onChange={(event) => onSettingsChange({ ...settings, translationModel: event.target.value })}>{models.map((model) => <option key={model} value={model}>{model}</option>)}</select></label>
-            <label>问答模型<select value={settings.chatModel} onChange={(event) => onSettingsChange({ ...settings, chatModel: event.target.value })}>{models.map((model) => <option key={model} value={model}>{model}</option>)}</select></label>
-            {settings.provider === "openai" && <label>推理强度<select value={settings.reasoningEffort} onChange={(event) => onSettingsChange({ ...settings, reasoningEffort: event.target.value })}><option value="none">无</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>}
-          </div>
-        )}
         <div className={`codex-connection-card ${status}`}>
           <RobotOutlined />
           <div>
-            <strong>{status === "ready" ? `${selected?.label || "AI 服务"} 已就绪` : status === "checking" ? "正在检测…" : settings.provider === "chatgpt-web" ? "ChatGPT 网页扩展尚未连接" : settings.provider === "cloudbase-hunyuan" ? "CloudBase 混元尚未配置" : settings.provider === "openai" ? "OpenAI API 尚未配置" : settings.provider === "mimo" ? "MiMo API 尚未配置" : "本机 AI 桥接未启动"}</strong>
-            <span>{status === "ready" ? settings.provider === "local-codex" ? `Paper Reader Skill ${skillAvailable ? "已安装" : "未检测到"}` : settings.provider === "chatgpt-web" ? "问答走已登录的 ChatGPT Chat；翻译和术语仍走 MiMo" : `翻译 ${settings.translationModel} · 问答 ${settings.chatModel}` : settings.provider === "chatgpt-web" ? "在 Chrome 扩展页加载 browser-extension 文件夹，然后打开并登录 chatgpt.com" : settings.provider === "cloudbase-hunyuan" ? "在本机 .env 中设置 CLOUDBASE_ENV_ID 和 CLOUDBASE_APIKEY 后重启" : settings.provider === "openai" ? "在本机 .env 中设置 OPENAI_API_KEY 后重启" : settings.provider === "mimo" ? "在本机 .env 中设置 MIMO_API_KEY 后重启" : "请用 npm run dev 启动网页和桥接"}</span>
+            <strong>{status === "ready" ? `${selected?.label || "AI 服务"} 已就绪` : status === "checking" ? "正在检测…" : settings.provider === "chatgpt-web" ? "ChatGPT 网页 Chat 尚未连接" : !codexInstalled ? "Codex CLI 尚未安装" : !codexLoggedIn ? "Codex 账号尚未连接" : "Codex 当前额度窗口不可用"}</strong>
+            <span>{status === "ready" ? settings.provider === "local-codex" ? `${codex?.account?.email || "ChatGPT 账号"}${codex?.account?.planType ? ` · ${codex.account.planType}` : ""} · Paper Reader Skill ${skillAvailable ? "已安装" : "未检测到"}` : "问答、翻译和术语都通过你当前可见的 ChatGPT Chat 页面完成" : settings.provider === "chatgpt-web" ? "优先安装 Chrome Web Store 版本；GitHub 版本可用本地扩展安装向导" : !codexInstalled ? "在仓库目录运行 npm run setup，可安装依赖并检查 Codex" : "点击下方按钮，用 ChatGPT 账号连接本机 Codex"}</span>
+            {settings.provider === "local-codex" && codexRates.length > 0 ? <span className="codex-rate-limits">{codexRates.map((rate) => `${rate.name || rate.id}：剩余 ${rate.remainingPercent ?? "未知"}%${rate.resetsAt ? `，${new Date(rate.resetsAt * 1000).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })} 重置` : ""}`).join(" · ")}</span> : null}
+            <span className="connection-inline-actions">
+              {settings.provider === "local-codex" && codexInstalled && !codexLoggedIn ? <button className="plain-button" onClick={onCodexLogin}>连接 ChatGPT 账号</button> : null}
+              {settings.provider === "local-codex" && codexLoggedIn ? <button className="plain-button" onClick={onCodexLogout}>退出 Codex 账号</button> : null}
+              {settings.provider === "chatgpt-web" && extensionStoreUrl ? <a className="plain-button" href={extensionStoreUrl} target="_blank" rel="noreferrer">从 Chrome 商店安装</a> : null}
+              {settings.provider === "chatgpt-web" ? <button className="plain-button" onClick={onOpenExtensionSetup}>打开 GitHub 版安装向导</button> : null}
+            </span>
           </div>
         </div>
         {testStatus && <div className="provider-test-status" role="status">{testStatus}</div>}
         <div className="modal-actions"><a className="plain-button tutorial-link" href={CODEX_TUTORIAL_URL} target="_blank" rel="noreferrer" aria-label="在新标签页打开 OpenAI Codex 使用教程">Codex 使用教程 <ExportOutlined /></a><button className="plain-button" onClick={onClose}>关闭</button><button className="plain-button" onClick={onRefresh}>刷新状态</button><button className="primary-button" onClick={onTest}>测试当前服务</button></div>
-        <small>AI 任务执行异常时会先交给本机 Codex 诊断和修复，修复仍失败才会显示最终错误；仓库实现问题也会优先由 Codex 实时核实。PDF 由浏览器解析，Word/PPT 仅会交给本机桥接临时转为 PDF。API Key 不会进入浏览器存储。</small>
+        <small>AI 任务执行异常时会在当前接入内自动重试，修复仍失败才会显示最终错误；ChatGPT 网页模式的问答、翻译和术语不会暗中切换到其他服务。Chrome 官方不允许 macOS/Windows 从 GitHub 静默安装本地 CRX；商店版是首选，GitHub unpacked 版需要在开发者模式中确认一次。扩展只操作可见页面，不读取 Cookie、密码或浏览器存储。</small>
       </section>
     </div>
   );
@@ -1297,6 +1309,7 @@ export default function Home() {
   const [aiSettings, setAISettings] = useState<AISettings>(DEFAULT_AI_SETTINGS);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [providerTestStatus, setProviderTestStatus] = useState("");
+  const [extensionStoreUrl, setExtensionStoreUrl] = useState("");
   const [lastTranslationUsage, setLastTranslationUsage] = useState<AIUsage | undefined>();
   const [lastTranslationProvider, setLastTranslationProvider] = useState("");
   const [lastTranslationPage, setLastTranslationPage] = useState(0);
@@ -1325,11 +1338,11 @@ export default function Home() {
   const repositoryUrl = detectedRepositoryUrl || repositoryFromReadPages;
   const selectedProvider = providers[aiSettings.provider];
   const selectedProviderAvailable = bridgeStatus === "ready" && Boolean(selectedProvider?.available);
-  const codexAvailable = bridgeStatus === "ready" && Boolean(providers["local-codex"]?.available);
-  const aiTaskProviderAvailable = selectedProviderAvailable || codexAvailable;
-  const effectiveAISettings = useMemo<AISettings>(() => selectedProviderAvailable ? aiSettings : { ...aiSettings, provider: "local-codex" }, [aiSettings, selectedProviderAvailable]);
-  const selectedProviderLabel = providerDisplayName(aiSettings.provider, aiSettings.provider !== "local-codex" ? aiSettings.chatModel : undefined);
-  const effectiveProviderLabel = providerDisplayName(effectiveAISettings.provider, effectiveAISettings.provider !== "local-codex" ? effectiveAISettings.chatModel : undefined);
+  const extensionPairingToken = providers["chatgpt-web"]?.pairingToken || "";
+  const aiTaskProviderAvailable = selectedProviderAvailable;
+  const effectiveAISettings = aiSettings;
+  const selectedProviderLabel = providerDisplayName(aiSettings.provider);
+  const effectiveProviderLabel = providerDisplayName(effectiveAISettings.provider);
   const selectedStatus: BridgeStatus = bridgeStatus === "checking" ? "checking" : selectedProviderAvailable ? "ready" : "offline";
   const folderMentionRecords = useMemo(() => libraryFolders.map((folder) => ({
     ...folder,
@@ -1385,14 +1398,15 @@ export default function Home() {
     try {
       const response = await fetch(`${CODEX_BRIDGE}/health`, { cache: "no-store" });
       if (!response.ok) throw new Error("Bridge unavailable");
-      const health = await response.json() as { providers?: ProviderMap; defaultProvider?: AIProviderId };
+      const health = await response.json() as { providers?: ProviderMap; defaultProvider?: AIProviderId; extensionStoreUrl?: string };
       const nextProviders = health.providers || {};
       setProviders(nextProviders);
+      setExtensionStoreUrl(health.extensionStoreUrl || "");
       setSkillAvailable(Boolean(nextProviders["local-codex"]?.skillAvailable));
       let storedProvider: AIProviderId | undefined;
       try {
         const stored = JSON.parse(localStorage.getItem(AI_SETTINGS_KEY) || "null") as Partial<AISettings> | null;
-        if (stored?.provider === "local-codex" || stored?.provider === "chatgpt-web" || stored?.provider === "cloudbase-hunyuan" || stored?.provider === "openai" || stored?.provider === "mimo") {
+        if (stored?.provider === "local-codex" || stored?.provider === "chatgpt-web") {
           storedProvider = stored.provider;
         }
       } catch {
@@ -1413,6 +1427,7 @@ export default function Home() {
       return true;
     } catch {
       setProviders({});
+      setExtensionStoreUrl("");
       setSkillAvailable(false);
       setBridgeStatus("offline");
       return false;
@@ -1422,9 +1437,25 @@ export default function Home() {
   useEffect(() => { void checkCodexBridge(); }, [checkCodexBridge]);
 
   useEffect(() => {
+    const token = extensionPairingToken;
+    if (!token) return;
+    const postToken = () => window.postMessage({ type: "paperlens:extension-pair", token }, window.location.origin);
+    const handleExtensionReady = (event: MessageEvent) => {
+      if (event.source === window && event.origin === window.location.origin && event.data?.type === "paperlens:extension-ready") postToken();
+    };
+    window.addEventListener("message", handleExtensionReady);
+    postToken();
+    const refreshTimer = window.setTimeout(() => { void checkCodexBridge(); }, 1_500);
+    return () => {
+      window.removeEventListener("message", handleExtensionReady);
+      window.clearTimeout(refreshTimer);
+    };
+  }, [checkCodexBridge, extensionPairingToken]);
+
+  useEffect(() => {
     try {
       const stored = JSON.parse(localStorage.getItem(AI_SETTINGS_KEY) || "null") as Partial<AISettings> | null;
-      if (stored && (stored.provider === "local-codex" || stored.provider === "chatgpt-web" || stored.provider === "cloudbase-hunyuan" || stored.provider === "openai" || stored.provider === "mimo")) {
+      if (stored && (stored.provider === "local-codex" || stored.provider === "chatgpt-web")) {
         setAISettings({
           provider: stored.provider,
           translationModel: stored.translationModel || DEFAULT_AI_SETTINGS.translationModel,
@@ -1550,6 +1581,58 @@ export default function Home() {
       setProviderTestStatus(error instanceof Error ? error.message : "连接测试失败");
     }
   }, [aiSettings.provider, checkCodexBridge]);
+
+  const connectCodexAccount = useCallback(async () => {
+    const loginWindow = window.open("about:blank", "_blank");
+    setProviderTestStatus("正在创建 Codex 登录会话…");
+    try {
+      const response = await fetch(`${CODEX_BRIDGE}/codex/login`, { method: "POST" });
+      const result = await response.json() as { authUrl?: string; error?: string };
+      if (!response.ok || !result.authUrl) throw new Error(result.error || "无法启动 Codex 登录");
+      if (loginWindow) loginWindow.location.href = result.authUrl;
+      else window.open(result.authUrl, "_blank", "noopener,noreferrer");
+      setProviderTestStatus("请在新页面完成 ChatGPT 登录；PaperLens 正在等待账号连接…");
+      for (let attempt = 0; attempt < 60; attempt += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 2_000));
+        const healthResponse = await fetch(`${CODEX_BRIDGE}/health`, { cache: "no-store" });
+        const health = await healthResponse.json() as { providers?: ProviderMap };
+        if (health.providers?.["local-codex"]?.account?.loggedIn) {
+          await checkCodexBridge();
+          setProviderTestStatus("本机 Codex 已连接 ChatGPT 账号");
+          return;
+        }
+      }
+      throw new Error("等待登录超时；完成网页登录后可点击“刷新状态”继续");
+    } catch (error) {
+      loginWindow?.close();
+      setProviderTestStatus(error instanceof Error ? error.message : "Codex 登录失败");
+    }
+  }, [checkCodexBridge]);
+
+  const logoutCodexAccount = useCallback(async () => {
+    setProviderTestStatus("正在退出 Codex 账号…");
+    try {
+      const response = await fetch(`${CODEX_BRIDGE}/codex/logout`, { method: "POST" });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error || "退出失败");
+      await checkCodexBridge();
+      setProviderTestStatus("Codex 账号已退出");
+    } catch (error) {
+      setProviderTestStatus(error instanceof Error ? error.message : "退出失败");
+    }
+  }, [checkCodexBridge]);
+
+  const openChatGPTWebSetup = useCallback(async () => {
+    setProviderTestStatus("正在打开 Chrome 扩展页和本地扩展目录…");
+    try {
+      const response = await fetch(`${CODEX_BRIDGE}/setup/chatgpt-web`, { method: "POST" });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error || "无法打开安装向导");
+      setProviderTestStatus("已打开安装向导：在 Chrome 开启开发者模式并选择 browser-extension 文件夹");
+    } catch (error) {
+      setProviderTestStatus(error instanceof Error ? error.message : "无法打开安装向导");
+    }
+  }, []);
 
   const refreshLibrary = useCallback(async () => {
     try {
@@ -2512,11 +2595,9 @@ export default function Home() {
           segments: pendingSegments.map(({ id, text: segmentText, kind }) => ({ id, text: segmentText, kind })),
           images: source.images.map(({ label, source: imageSource, pageNumber: imagePageNumber, dataUrl }) => ({ label, source: imageSource, pageNumber: imagePageNumber, dataUrl })),
           paperTitle: fileName,
-        }, repairAttempt > 0 && codexAvailable ? { ...aiSettings, provider: "local-codex" } : effectiveAISettings, signal),
+        }, effectiveAISettings, signal),
         (pendingSegments, repairAttempt) => {
-          setMessage(codexAvailable
-            ? `第 ${sourcePage} 页执行异常，Codex 正在诊断并修复（${repairAttempt}/${MAX_TRANSLATION_REPAIR_ATTEMPTS}）…`
-            : `第 ${sourcePage} 页执行异常，${effectiveProviderLabel} 正在自动重试（${repairAttempt}/${MAX_TRANSLATION_REPAIR_ATTEMPTS}）…`);
+          setMessage(`第 ${sourcePage} 页执行异常，${effectiveProviderLabel} 正在自动重试（${repairAttempt}/${MAX_TRANSLATION_REPAIR_ATTEMPTS}）…`);
         },
       );
       const result = completion.results.at(-1)!;
@@ -2526,7 +2607,7 @@ export default function Home() {
       if (!(error instanceof TranslationRepairError)) throw error;
       const missingPreview = error.missingIds.slice(0, 4).join("、");
       const details = error.parseError || `缺少 ${error.missingIds.length} 个段落${missingPreview ? `：${missingPreview}${error.missingIds.length > 4 ? "…" : ""}` : ""}`;
-      throw new Error(`第 ${sourcePage} 页经 Codex 自动修复 ${MAX_TRANSLATION_REPAIR_ATTEMPTS} 次后仍失败（${details}）`);
+      throw new Error(`第 ${sourcePage} 页经 ${effectiveProviderLabel} 自动修复 ${MAX_TRANSLATION_REPAIR_ATTEMPTS} 次后仍失败（${details}）`);
     }
   };
 
@@ -2551,7 +2632,7 @@ export default function Home() {
     setTranslatingPage(sourcePage);
     setRightTab("translation");
     setMobileView("translation");
-    setMessage(`${providerDisplayName(effectiveAISettings.provider, effectiveAISettings.provider !== "local-codex" ? effectiveAISettings.translationModel : undefined)} 正在翻译第 ${sourcePage} 页…`);
+    setMessage(`${providerDisplayName(effectiveAISettings.provider)} 正在翻译第 ${sourcePage} 页…`);
     try {
       const source = await getTranslationSource(sourcePage, controller.signal);
       if (source.visualOnly) setMessage(`${selectedProviderLabel} 正在识别并翻译第 ${sourcePage} 页图片…`);
@@ -2560,7 +2641,7 @@ export default function Home() {
       setTranslations(nextTranslations);
       await persistTranslations(nextTranslations);
       setLastTranslationUsage(result.usage);
-      setLastTranslationProvider(providerDisplayName(result.provider, result.model));
+      setLastTranslationProvider(providerDisplayName(result.provider));
       setLastTranslationPage(sourcePage);
       const completed = compatibleTranslationPages(nextTranslations, pageSegments).length;
       setFullTranslation((previous) => {
@@ -2573,7 +2654,7 @@ export default function Home() {
             : previous.status === "paused" ? "paused" : "idle";
         return { ...previous, status, completed, total: pdf?.numPages || previous.total, failedPages, failedReasons };
       });
-      setMessage(`第 ${sourcePage} 页${source.visualOnly ? "图片识别与" : ""}翻译完成 · ${providerDisplayName(result.provider, result.model)}${result.usage ? ` · ${usageSummary(result.usage)}` : ""}`);
+      setMessage(`第 ${sourcePage} 页${source.visualOnly ? "图片识别与" : ""}翻译完成 · ${providerDisplayName(result.provider)}${result.usage ? ` · ${usageSummary(result.usage)}` : ""}`);
     } catch (error) {
       if (isAbortError(error)) {
         setMessage("已停止当前页翻译");
@@ -2643,7 +2724,7 @@ export default function Home() {
           completed = compatibleTranslationPages(nextTranslations, pageSegments).length;
           consecutiveFailures = 0;
           accumulatedUsage = mergeTranslationUsage(accumulatedUsage, result.usage);
-          lastProviderLabel = providerDisplayName(result.provider, result.model);
+          lastProviderLabel = providerDisplayName(result.provider);
           setTranslations(nextTranslations);
           setLastTranslationUsage(result.usage);
           setLastTranslationProvider(lastProviderLabel);
@@ -2696,9 +2777,8 @@ export default function Home() {
     setExtractingTermsPage(sourcePage);
     setTermsError("");
     try {
-      const recovery = await runWithCodexRecovery({
+      const recovery = await runWithProviderRecovery({
         settings: effectiveAISettings,
-        codexAvailable,
         run: async (settings, repairError) => {
           const result = await invokeAI({
             mode: "terms",
@@ -2708,7 +2788,7 @@ export default function Home() {
           }, settings, controller.signal);
           return { result, extracted: parsePaperTerms(result.answer) };
         },
-        onRepair: () => setTermsError("Codex 正在诊断并修复术语整理任务…"),
+        onRepair: () => setTermsError(`${effectiveProviderLabel} 正在诊断并重试术语整理任务…`),
       });
       const { extracted } = recovery.value;
       const nextTerms = { ...paperTerms, [sourcePage]: extracted };
@@ -2729,7 +2809,7 @@ export default function Home() {
         setExtractingTermsPage(0);
       }
     }
-  }, [aiTaskProviderAvailable, codexAvailable, currentPaperId, effectiveAISettings, fileName, paperTerms]);
+  }, [aiTaskProviderAvailable, currentPaperId, effectiveAISettings, effectiveProviderLabel, fileName, paperTerms]);
 
   useEffect(() => {
     termsAbortRef.current?.abort();
@@ -3030,9 +3110,8 @@ export default function Home() {
       const referencedPapers = [...explicitReferencedPapers, ...rankedFolderPapers];
       const repositoryCandidates = buildPaperAliases([repositoryUrl, ...referencedPapers.map((paper) => paper.repositoryUrl)]);
       const activeRepositoryUrl = repositoryCandidates.find((candidate) => candidate.startsWith("http")) || "";
-      const recovery = await runWithCodexRecovery({
+      const recovery = await runWithProviderRecovery({
         settings: effectiveAISettings,
-        codexAvailable,
         run: (settings, repairError) => invokeAI({
           mode: activeRepositoryUrl ? "auto" : "chat",
           question,
@@ -3046,7 +3125,7 @@ export default function Home() {
           repairError,
           images: [...chatPageSource.images, ...chatImages].map(({ label, source, pageNumber: imagePageNumber, dataUrl }) => ({ label, source, pageNumber: imagePageNumber, dataUrl })),
         }, settings, controller.signal),
-        onRepair: () => setChatStatus("AI 任务执行异常，Codex 正在诊断并修复…"),
+        onRepair: () => setChatStatus(`AI 任务执行异常，${effectiveProviderLabel} 正在诊断并重试…`),
       });
       const result = recovery.value;
       if (!requestIsCurrent()) return;
@@ -3056,7 +3135,7 @@ export default function Home() {
         text: result.answer,
         repositoryUsed: result.repositoryUsed,
         repositoryName: activeRepositoryUrl ? repositoryName(activeRepositoryUrl) : undefined,
-        providerLabel: providerDisplayName(result.provider, result.model),
+        providerLabel: providerDisplayName(result.provider),
         model: result.model,
         usage: result.usage,
         latencyMs: result.latencyMs,
@@ -3315,10 +3394,14 @@ export default function Home() {
       bridgeStatus={bridgeStatus}
       skillAvailable={skillAvailable}
       testStatus={providerTestStatus}
+      extensionStoreUrl={extensionStoreUrl}
       onSettingsChange={(settings) => { setAISettings(settings); setProviderTestStatus(""); }}
       onClose={() => setShowConnect(false)}
       onRefresh={() => { setProviderTestStatus(""); void checkCodexBridge(); }}
       onTest={() => void testSelectedProvider()}
+      onCodexLogin={() => void connectCodexAccount()}
+      onCodexLogout={() => void logoutCodexAccount()}
+      onOpenExtensionSetup={() => void openChatGPTWebSetup()}
     />
   ) : null;
 
@@ -3355,7 +3438,7 @@ export default function Home() {
           <div className="library-header-actions">
             <button className={`library-bridge ${selectedStatus}`} onClick={() => setShowConnect(true)}>
               <i />
-              {selectedStatus === "ready" ? `${selectedProviderLabel} 已连接` : selectedStatus === "checking" ? "正在检测 AI 服务" : aiSettings.provider === "chatgpt-web" ? "ChatGPT 网页扩展未连接" : aiSettings.provider === "cloudbase-hunyuan" ? "CloudBase 混元未配置" : aiSettings.provider === "openai" ? "OpenAI API 未配置" : aiSettings.provider === "mimo" ? "MiMo API 未配置" : "Codex 未连接"}
+              {selectedStatus === "ready" ? `${selectedProviderLabel} 已连接` : selectedStatus === "checking" ? "正在检测 AI 服务" : aiSettings.provider === "chatgpt-web" ? "ChatGPT 网页 Chat 未连接" : providers["local-codex"]?.installation?.installed ? "Codex 账号未连接或额度暂不可用" : "Codex CLI 未安装"}
             </button>
             <button className="library-import-button" onClick={() => fileInputRef.current?.click()}><PlusOutlined /> 导入文档</button>
           </div>
@@ -3555,7 +3638,7 @@ export default function Home() {
         <header className="document-header">
           <div className="breadcrumb"><button className="breadcrumb-home" onClick={goToWorkspace}><HomeOutlined /> 我的空间</button> <span>/</span> <strong>{fileName || "未导入文档"}</strong> <DownOutlined /></div>
           <div className="document-actions">
-            <button className={`bridge-pill ${selectedStatus}`} onClick={() => setShowConnect(true)} title="AI 服务设置"><RobotOutlined /> {selectedStatus === "ready" ? selectedProviderLabel : selectedStatus === "checking" ? "检测 AI 服务" : aiSettings.provider === "local-codex" ? "Codex 未连接" : aiSettings.provider === "chatgpt-web" ? "ChatGPT 未连接" : "API 未配置"}</button>
+            <button className={`bridge-pill ${selectedStatus}`} onClick={() => setShowConnect(true)} title="本地 AI 接入"><RobotOutlined /> {selectedStatus === "ready" ? selectedProviderLabel : selectedStatus === "checking" ? "检测 AI 服务" : aiSettings.provider === "local-codex" ? "Codex 未连接" : "ChatGPT 未连接"}</button>
             <button onClick={() => fileInputRef.current?.click()}><UploadOutlined /> 更换 PDF</button>
           </div>
         </header>

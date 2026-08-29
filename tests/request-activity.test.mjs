@@ -12,25 +12,25 @@ test("maps translation, chat, and terminology work to independent task channels"
 
 test("tracks concurrent tasks on one provider without an exclusive busy lock", () => {
   const activity = createRequestActivityTracker();
-  const stopTranslation = activity.start("mimo", "translate");
-  const stopChat = activity.start("mimo", "chat");
-  const stopTerms = activity.start("mimo", "terms");
+  const stopTranslation = activity.start("chatgpt-web", "translate");
+  const stopChat = activity.start("chatgpt-web", "chat");
+  const stopTerms = activity.start("chatgpt-web", "terms");
 
-  assert.deepEqual(activity.snapshot("mimo"), {
+  assert.deepEqual(activity.snapshot("chatgpt-web"), {
     total: 3,
     channels: { translation: 1, chat: 1, terms: 1 },
   });
 
   stopChat();
   stopChat();
-  assert.deepEqual(activity.snapshot("mimo"), {
+  assert.deepEqual(activity.snapshot("chatgpt-web"), {
     total: 2,
     channels: { translation: 1, chat: 0, terms: 1 },
   });
 
   stopTranslation();
   stopTerms();
-  assert.deepEqual(activity.snapshot("mimo"), {
+  assert.deepEqual(activity.snapshot("chatgpt-web"), {
     total: 0,
     channels: { translation: 0, chat: 0, terms: 0 },
   });

@@ -50,6 +50,54 @@ function findSendButton() {
   ]);
 }
 
+function findFileInput() {
+  return document.querySelector('input[type="file"][accept*="image"], input[type="file"][accept*="png"], input[type="file"]');
+}
+
+async function waitForFileInput(timeoutMs = 3_000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const input = findFileInput();
+    if (input) return input;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return null;
+}
+
+async function dataUrlFile(image, index) {
+  const match = /^data:(image\/(?:png|jpe?g|webp));base64,/i.exec(image.dataUrl || "");
+  if (!match) throw new Error(`第 ${index + 1} 张图片格式不受支持`);
+  const response = await fetch(image.dataUrl);
+  const blob = await response.blob();
+  const extension = match[1].toLowerCase().includes("png") ? "png" : match[1].toLowerCase().includes("webp") ? "webp" : "jpg";
+  return new File([blob], `paperlens-${index + 1}.${extension}`, { type: match[1] });
+}
+
+async function attachImages(images) {
+  if (!images.length) return;
+  let input = findFileInput();
+  if (!input) {
+    const attachmentButton = firstVisible([
+      'button[data-testid*="composer-plus"]',
+      'button[aria-label*="添加文件"]',
+      'button[aria-label*="上传"]',
+      'button[aria-label*="Attach"]',
+      'button[aria-label*="Upload"]',
+    ]);
+    attachmentButton?.click();
+    input = await waitForFileInput();
+  }
+  if (!input) throw new Error("没有找到 ChatGPT 图片上传入口");
+  const transfer = new DataTransfer();
+  for (let index = 0; index < images.length; index += 1) {
+    transfer.items.add(await dataUrlFile(images[index], index));
+  }
+  input.files = transfer.files;
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  input.dispatchEvent(new Event("change", { bubbles: true }));
+  await new Promise((resolve) => setTimeout(resolve, 1_000));
+}
+
 function generationActive() {
   if (firstVisible(STOP_SELECTORS)) return true;
   return [...document.querySelectorAll("button")].some((button) => {
@@ -85,12 +133,13 @@ async function waitForAnswer(requestId, beforeCount, timeoutMs) {
   throw new Error("等待 ChatGPT 网页回答超时");
 }
 
-async function ask({ requestId, prompt, timeoutMs }) {
+async function ask({ requestId, prompt, images = [], timeoutMs }) {
   if (!signedIn()) throw new Error("请先在 ChatGPT 网页登录");
   if (typeof prompt !== "string" || !prompt.trim()) throw new Error("PaperLens 没有提供问题");
   const editor = firstVisible(PROMPT_SELECTORS);
   if (!editor) throw new Error("没有找到 ChatGPT 输入框");
   const beforeCount = document.querySelectorAll(ASSISTANT_SELECTOR).length;
+  await attachImages(Array.isArray(images) ? images.slice(0, 8) : []);
   setPrompt(editor, prompt);
   await new Promise((resolve) => setTimeout(resolve, 100));
   const sendButton = findSendButton();

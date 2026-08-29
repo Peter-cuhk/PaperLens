@@ -4,6 +4,7 @@ import test from "node:test";
 import { WebSocket } from "ws";
 
 import { createChatGPTWebProvider } from "../bridge/providers/chatgpt-web.mjs";
+import { parseTranslationResponse } from "../app/translation-response.ts";
 
 async function freePort() {
   const server = createServer();
@@ -13,12 +14,12 @@ async function freePort() {
   return address.port;
 }
 
-async function connectExtension(port) {
+async function connectExtension(port, token) {
   let lastError;
   for (let attempt = 0; attempt < 30; attempt += 1) {
     try {
       return await new Promise((resolve, reject) => {
-        const socket = new WebSocket(`ws://127.0.0.1:${port}`, {
+        const socket = new WebSocket(`ws://127.0.0.1:${port}?token=${encodeURIComponent(token)}`, {
           origin: "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         });
         socket.once("open", () => resolve(socket));
@@ -40,7 +41,7 @@ test("ChatGPT Web provider crosses the MCP boundary and receives a browser answe
   let socket;
   try {
     assert.equal((await provider.refreshStatus()).ok, false);
-    socket = await connectExtension(port);
+    socket = await connectExtension(port, provider.pairingToken);
     socket.on("message", (raw) => {
       const message = JSON.parse(raw.toString());
       if (message.type === "status-request") {
@@ -48,11 +49,13 @@ test("ChatGPT Web provider crosses the MCP boundary and receives a browser answe
       }
       if (message.type === "ask") {
         assert.match(message.prompt, /selected paragraph/);
+        assert.equal(message.images.length, 1);
+        assert.match(message.images[0].dataUrl, /^data:image\/png;base64,/);
         socket.send(JSON.stringify({
           type: "result",
           requestId: message.requestId,
           ok: true,
-          answer: "PAPERLENS_WEB_CHAT_OK\nMCP browser bridge returned the answer.",
+          answer: '{"segments":[{"id":"p1-s1","translation":"网页翻译完成","formulaExplanation":""}]}',
           conversationUrl: "https://chatgpt.com/c/test",
         }));
       }
@@ -60,9 +63,9 @@ test("ChatGPT Web provider crosses the MCP boundary and receives a browser answe
     socket.send(JSON.stringify({ type: "hello", signedIn: true, url: "https://chatgpt.com/" }));
     await new Promise((resolve) => setTimeout(resolve, 50));
     assert.equal((await provider.testConnection()).ok, true);
-    const result = await provider.invoke({ mode: "chat" }, { prompt: "selected paragraph", signal: new AbortController().signal });
+    const result = await provider.invoke({ mode: "translate", images: [{ label: "page 1", dataUrl: "data:image/png;base64,aGVsbG8=" }] }, { prompt: "selected paragraph", signal: new AbortController().signal });
     assert.equal(result.provider, "chatgpt-web");
-    assert.match(result.answer, /^PAPERLENS_WEB_CHAT_OK/);
+    assert.equal(parseTranslationResponse(result.answer, [{ id: "p1-s1", kind: "paragraph", text: "paper" }]).translated[0].translation, "网页翻译完成");
     assert.equal(result.conversationUrl, "https://chatgpt.com/c/test");
   } finally {
     socket?.close();

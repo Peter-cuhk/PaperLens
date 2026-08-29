@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -20,6 +21,7 @@ export function createChatGPTWebProvider({
   enabled = process.env.PAPERLENS_CHATGPT_WEB_ENABLED !== "0",
   command = process.execPath,
   serverPath = MCP_SERVER_PATH,
+  pairingToken = process.env.PAPERLENS_CHATGPT_WEB_TOKEN || randomUUID(),
   clientFactory,
 } = {}) {
   let client = null;
@@ -29,7 +31,7 @@ export function createChatGPTWebProvider({
 
   async function getClient() {
     if (client) return client;
-    if (!enabled) throw new ProviderError("ChatGPT 网页实验功能尚未启用", { code: "provider_not_configured", status: 503, provider: "chatgpt-web" });
+    if (!enabled) throw new ProviderError("ChatGPT 网页功能尚未启用", { code: "provider_not_configured", status: 503, provider: "chatgpt-web" });
     if (!connecting) {
       connecting = (async () => {
         if (clientFactory) {
@@ -44,6 +46,7 @@ export function createChatGPTWebProvider({
           env: {
             ...process.env,
             PAPERLENS_CHATGPT_WEB_PORT: process.env.PAPERLENS_CHATGPT_WEB_PORT || "43124",
+            PAPERLENS_CHATGPT_WEB_TOKEN: pairingToken,
           },
           stderr: "inherit",
           maxBufferSize: 4 * 1024 * 1024,
@@ -82,13 +85,17 @@ export function createChatGPTWebProvider({
     return status;
   }
 
-  async function invoke(_payload, { prompt, signal } = {}) {
+  async function invoke(payload, { prompt, signal } = {}) {
     if (!prompt?.trim()) throw new ProviderError("ChatGPT 网页请求缺少提示词", { code: "invalid_request", status: 400, provider: "chatgpt-web" });
+    const images = Array.isArray(payload?.images) ? payload.images.slice(0, 8).map((image, index) => ({
+      label: typeof image?.label === "string" ? image.label.slice(0, 200) : `PaperLens image ${index + 1}`,
+      dataUrl: typeof image?.dataUrl === "string" ? image.dataUrl : "",
+    })).filter((image) => /^data:image\/(?:png|jpe?g|webp);base64,/i.test(image.dataUrl)) : [];
     try {
       const mcp = await getClient();
       const raw = await mcp.callTool({
         name: "ask_chatgpt_web",
-        arguments: { prompt },
+        arguments: { prompt, images },
       }, undefined, {
         signal,
         timeout: 240_000,
@@ -118,12 +125,13 @@ export function createChatGPTWebProvider({
 
   return {
     id: "chatgpt-web",
-    label: "ChatGPT 网页 · 实验",
+    label: "ChatGPT 网页 Chat",
     configured: Boolean(enabled),
     get available() { return available; },
-    models: { translation: "mimo-v2.5", chat: "chatgpt-web" },
+    pairingToken,
+    models: { translation: "chatgpt-web", chat: "chatgpt-web" },
     allowedModels: ["chatgpt-web"],
-    capabilities: { text: true, images: false, structuredOutput: false, repositoryVerification: false, chatOnly: true },
+    capabilities: { text: true, images: true, structuredOutput: true, repositoryVerification: false, chatOnly: false },
     refreshStatus,
     testConnection,
     invoke,

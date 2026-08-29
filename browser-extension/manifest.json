@@ -2,9 +2,14 @@
   "manifest_version": 3,
   "name": "PaperLens ChatGPT Web Bridge",
   "version": "0.1.0",
-  "description": "Experimental local bridge between PaperLens and a visible signed-in ChatGPT web chat.",
-  "permissions": ["tabs"],
-  "host_permissions": ["https://chatgpt.com/*"],
+  "description": "Local bridge between PaperLens and the user's visible signed-in ChatGPT web chat.",
+  "icons": {
+    "16": "icon-16.png",
+    "48": "icon-48.png",
+    "128": "icon-128.png"
+  },
+  "permissions": ["tabs", "storage"],
+  "host_permissions": ["https://chatgpt.com/*", "http://localhost:3000/*", "http://127.0.0.1:3000/*"],
   "background": {
     "service_worker": "background.js"
   },
@@ -13,9 +18,18 @@
       "matches": ["https://chatgpt.com/*"],
       "js": ["content.js"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": ["http://localhost:3000/*", "http://127.0.0.1:3000/*"],
+      "js": ["paperlens.js"],
+      "run_at": "document_start"
     }
   ],
   "action": {
-    "default_title": "PaperLens ChatGPT Web Bridge"
+    "default_title": "PaperLens ChatGPT Web Bridge",
+    "default_icon": {
+      "16": "icon-16.png",
+      "48": "icon-48.png"
+    }
   }
 }

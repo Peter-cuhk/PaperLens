@@ -9,6 +9,16 @@ target_app="/Applications/PaperLens.app"
 build_root="$(mktemp -d)"
 iconset="$build_root/PaperLens.iconset"
 compiled_app="$build_root/PaperLens.app"
+generated_script="$build_root/PaperLens.applescript"
+node_path="$(command -v node)"
+
+escape_sed() {
+  printf '%s' "$1" | sed 's/[&|\\]/\\&/g'
+}
+
+project_replacement="$(escape_sed "$project_root")"
+node_replacement="$(escape_sed "$node_path")"
+sed -e "s|__PROJECT_PATH__|$project_replacement|g" -e "s|__NODE_PATH__|$node_replacement|g" "$source_script" > "$generated_script"
 
 mkdir -p "$iconset"
 qlmanage -t -s 1024 -o "$build_root" "$source_icon" >/dev/null 2>&1
@@ -26,7 +36,7 @@ sips -z 512 512 "$base_icon" --out "$iconset/icon_512x512.png" >/dev/null
 cp "$base_icon" "$iconset/icon_512x512@2x.png"
 iconutil -c icns "$iconset" -o "$build_root/PaperLens.icns"
 
-osacompile -o "$compiled_app" "$source_script"
+osacompile -o "$compiled_app" "$generated_script"
 cp "$build_root/PaperLens.icns" "$compiled_app/Contents/Resources/applet.icns"
 if /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$compiled_app/Contents/Info.plist" >/dev/null 2>&1; then
   /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier com.paperlens.local" "$compiled_app/Contents/Info.plist"

@@ -2,6 +2,7 @@ const BRIDGE_URL = "ws://127.0.0.1:43124";
 let socket;
 let reconnectTimer;
 let creatingChatGPTTab;
+let pairingToken = "";
 
 function send(payload) {
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(payload));
@@ -69,6 +70,7 @@ async function handleAsk(message) {
       type: "paperlens:ask",
       requestId: message.requestId,
       prompt: message.prompt,
+      images: Array.isArray(message.images) ? message.images : [],
       timeoutMs: message.timeoutMs,
     });
     send({
@@ -91,7 +93,9 @@ async function handleAsk(message) {
 
 function connect() {
   clearTimeout(reconnectTimer);
-  socket = new WebSocket(BRIDGE_URL);
+  if (!pairingToken) return;
+  socket?.close();
+  socket = new WebSocket(`${BRIDGE_URL}?token=${encodeURIComponent(pairingToken)}`);
   socket.addEventListener("open", () => {
     send({ type: "hello", signedIn: false, url: "" });
     void reportStatus();
@@ -113,11 +117,27 @@ function connect() {
     }
   });
   socket.addEventListener("close", () => {
-    reconnectTimer = setTimeout(connect, 1200);
+    if (pairingToken) reconnectTimer = setTimeout(connect, 1200);
   });
   socket.addEventListener("error", () => socket.close());
 }
 
-chrome.runtime.onInstalled.addListener(connect);
-chrome.runtime.onStartup.addListener(connect);
-connect();
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type !== "paperlens:pair" || typeof message.token !== "string" || !message.token) return false;
+  const source = sender.tab?.url || sender.url || "";
+  if (!/^http:\/\/(?:localhost|127\.0\.0\.1):3000\//.test(source)) return false;
+  pairingToken = message.token;
+  void chrome.storage.session.set({ paperLensPairingToken: pairingToken }).then(connect);
+  sendResponse({ ok: true });
+  return false;
+});
+
+async function restorePairing() {
+  const stored = await chrome.storage.session.get("paperLensPairingToken");
+  pairingToken = typeof stored.paperLensPairingToken === "string" ? stored.paperLensPairingToken : "";
+  connect();
+}
+
+chrome.runtime.onInstalled.addListener(restorePairing);
+chrome.runtime.onStartup.addListener(restorePairing);
+void restorePairing();

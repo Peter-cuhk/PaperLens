@@ -5,51 +5,40 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadEnvFile } from "node:process";
 import { fileURLToPath } from "node:url";
+import { CodexAccountClient, detectCodexInstallation, readCodexCliLoginStatus } from "./codex-account.mjs";
 import { ProviderError, normalizeProviderError } from "./provider-errors.mjs";
-import { INVOCATION_MODES, PROVIDER_IDS, resolveProviderRoute, shouldFallbackToMiMo } from "./provider-routing.mjs";
-import { createCloudBaseHunyuanProvider } from "./providers/cloudbase-hunyuan.mjs";
+import { INVOCATION_MODES, PROVIDER_IDS, resolveProviderRoute } from "./provider-routing.mjs";
 import { createChatGPTWebProvider } from "./providers/chatgpt-web.mjs";
-import { createMiMoProvider } from "./providers/mimo.mjs";
-import { createOpenAIProvider } from "./providers/openai.mjs";
 import { createDocumentConverter, DocumentConversionError } from "./document-converter.mjs";
 import { createRequestActivityTracker } from "./request-activity.mjs";
 
-const HOST = "127.0.0.1";
-const PORT = Number(process.env.PAPERLENS_CODEX_PORT || 43123);
 const PROJECT_ROOT = fileURLToPath(new URL("../", import.meta.url));
 try {
   loadEnvFile(join(PROJECT_ROOT, ".env"));
 } catch (error) {
   if (error?.code !== "ENOENT") throw error;
 }
-const CODEX_CANDIDATES = [process.env.PAPERLENS_CODEX_PATH, "/opt/homebrew/bin/codex", "/usr/local/bin/codex"].filter(Boolean);
+const HOST = "127.0.0.1";
+const PORT = Number(process.env.PAPERLENS_CODEX_PORT || 43123);
+const APP_PORT = Number(process.env.PAPERLENS_PORT || 3000);
 const CODEX_ROOT = process.env.CODEX_HOME || join(homedir(), ".codex");
 const PAPER_READER_SKILL = process.env.PAPERLENS_SKILL_PATH || join(CODEX_ROOT, "skills", "paper-reader", "SKILL.md");
 const ALLOWED_ORIGINS = new Set([
-  "http://localhost:3000",
-  "http://127.0.0.1:3000",
+  `http://localhost:${APP_PORT}`,
+  `http://127.0.0.1:${APP_PORT}`,
 ]);
 
-let codexPath = "codex";
+const codexInstallation = await detectCodexInstallation();
+let codexPath = codexInstallation.command;
+let codexAccountStatus = { loggedIn: false, authMode: null, email: null, planType: null, rateLimits: [], rateLimitReached: false };
 let codexAvailable = false;
+let codexStatusPromise = null;
+let codexStatusCheckedAt = 0;
+const codexAccountClient = codexInstallation.installed ? new CodexAccountClient(codexPath) : null;
 const requestActivity = createRequestActivityTracker();
 let documentConversionActive = false;
 let skillAvailable = false;
 
-for (const candidate of CODEX_CANDIDATES) {
-  try {
-    await access(candidate);
-    codexPath = candidate;
-    codexAvailable = true;
-    break;
-  } catch {
-    // Continue to the next known installation path.
-  }
-}
-
-const openAIProvider = createOpenAIProvider();
-const cloudBaseHunyuanProvider = createCloudBaseHunyuanProvider();
-const mimoProvider = createMiMoProvider();
 const chatGPTWebProvider = createChatGPTWebProvider();
 const documentConverter = await createDocumentConverter();
 
@@ -60,8 +49,39 @@ try {
   skillAvailable = false;
 }
 
+async function refreshCodexStatus({ force = false, refreshToken = false } = {}) {
+  if (!codexInstallation.installed || !codexAccountClient) {
+    codexAvailable = false;
+    return codexAccountStatus;
+  }
+  if (!force && Date.now() - codexStatusCheckedAt < 5_000) return codexAccountStatus;
+  if (codexStatusPromise) return codexStatusPromise;
+  codexStatusPromise = (async () => {
+    try {
+      codexAccountStatus = await codexAccountClient.readStatus({ refreshToken });
+    } catch {
+      const fallback = await readCodexCliLoginStatus(codexPath);
+      codexAccountStatus = {
+        loggedIn: fallback.loggedIn,
+        authMode: fallback.authMode,
+        email: null,
+        planType: null,
+        rateLimits: [],
+        rateLimitReached: false,
+        limitedStatus: true,
+      };
+    }
+    codexAvailable = codexAccountStatus.loggedIn && !codexAccountStatus.rateLimitReached;
+    codexStatusCheckedAt = Date.now();
+    return codexAccountStatus;
+  })().finally(() => { codexStatusPromise = null; });
+  return codexStatusPromise;
+}
+
+void refreshCodexStatus({ force: true });
+
 function corsHeaders(origin) {
-  const allowedOrigin = ALLOWED_ORIGINS.has(origin) ? origin : "http://localhost:3000";
+  const allowedOrigin = ALLOWED_ORIGINS.has(origin) ? origin : `http://localhost:${APP_PORT}`;
   return {
     "access-control-allow-origin": allowedOrigin,
     "access-control-allow-headers": "content-type,x-paperlens-file-name",
@@ -205,7 +225,7 @@ function buildPrompt(payload) {
       })).filter((segment) => segment.id && segment.text)
     : [];
   const history = Array.isArray(payload.history)
-    ? payload.history.slice(-6).map((item) => `${item.role === "assistant" ? "Codex" : "读者"}: ${compact(item.text, 2_000)}`).join("\n\n")
+    ? payload.history.slice(-6).map((item) => `${item.role === "assistant" ? "助手" : "读者"}: ${compact(item.text, 2_000)}`).join("\n\n")
     : "";
 
   if (mode === "translate") {
@@ -215,7 +235,7 @@ function buildPrompt(payload) {
     const pageNumber = Number.isInteger(payload.pageNumber) ? payload.pageNumber : 1;
     const segments = translationSegments.length ? translationSegments : [{ id: `p${pageNumber}-s1`, kind: "paragraph", text: pageText }];
     return [
-      "Use $paper-reader in translation mode.",
+      "Follow the PaperLens translation rules below.",
       "你是 PaperLens 中的学习资料翻译助手。把下面的英文资料（可能是论文、课程 PPT、讲义或阅读材料）翻译成自然、准确、易读的简体中文。",
       "严格要求：保留章节层级、公式、变量、引用编号和专业术语；不要总结；不要补充原文没有的信息。",
       "公式规则：所有可可靠还原的数学公式必须转写为有效 LaTeX；行内公式使用 \\( ... \\)，独立公式使用 \\[ ... \\]。不要在公式分隔符外裸露下划线、花括号或 \\prod、\\sum 等命令。公式内容本身不要翻译或改写。",
@@ -225,7 +245,7 @@ function buildPrompt(payload) {
       "读者明确希望理解公式：只要本段包含公式，就在 formulaExplanation 中用 1–3 句简体中文解释公式表达的关系、主要变量和上下标/求和范围；只依据当前页上下文，不确定的符号要明确说上下文未定义。没有公式时 formulaExplanation 必须是空字符串。",
       "JSON 转义要求：LaTeX 的每个反斜杠在 JSON 字符串中必须写成双反斜杠，例如 \\\\prod、\\\\theta、\\\\[ 和 \\\\]；确保整个输出可被 JSON.parse 直接解析。",
       "为了让原文与译文双向同步，只输出严格 JSON，不要 Markdown 代码围栏，不要输出 JSON 以外的说明。结构必须是：{\"segments\":[{\"id\":\"原始 id\",\"translation\":\"对应中文译文（公式用 LaTeX 或 [[SOURCE_FORMULA]]）\",\"formulaExplanation\":\"公式解释；无公式时为空字符串\"}]}。每个输入 id 必须恰好出现一次、顺序不变，不得合并或拆分段落。",
-      repairAttempt > 0 ? `这是第 ${repairAttempt} 次 Codex 自动修复请求。上一次任务失败：${repairError || "译文响应不完整"}。请根据错误修复执行方式；本次输入只包含待补译段落，必须逐个完整返回所有 ${segments.length} 个 id，不得省略。` : "",
+      repairAttempt > 0 ? `这是第 ${repairAttempt} 次自动修复请求。上一次任务失败：${repairError || "译文响应不完整"}。请根据错误修复执行方式；本次输入只包含待补译段落，必须逐个完整返回所有 ${segments.length} 个 id，不得省略。` : "",
       visualPage ? "当前页采用整页视觉翻译：可能没有文字层，也可能因多栏、表格或跨栏内容使文字层顺序不可靠。必须实际查看随请求附带的整页图片，按视觉区块和真实阅读顺序翻译全部清晰可见的英文；绝对不得把同一水平线上的左右栏内容交叉拼接。保留标题、段落、图表标题、数字和专有名词；每个原文段落之间留一个空行。表格必须输出为 Markdown 表格，保持原始列名、行名、数值及加粗关系，表注单独成段，不得与旁边正文混合。看不清的文字标为［无法辨认］，禁止猜测。输入中 [[PAPERLENS_VISUAL_PAGE]] 只是视觉页占位符，不得翻译或出现在译文中。整页译文放入唯一输入 id 对应的 translation。" : "",
       `资料：${paperTitle || "本地资料"}`,
       visualPage ? `图片上下文：${attachedImages.map((image) => `${image.label}${image.pageNumber ? `（第 ${image.pageNumber} 页）` : ""}`).join("、")}` : "",
@@ -237,7 +257,7 @@ function buildPrompt(payload) {
   if (mode === "terms") {
     if (!pageText) throw new Error("当前页没有可整理的文字");
     return [
-      "Use $paper-reader and preserve accurate academic terminology.",
+      "Follow the PaperLens terminology rules below and preserve accurate academic terminology.",
       "你是 PaperLens 的学习资料术语整理助手。只根据下面这一页实际出现的英文内容，提取 6–10 个对理解本页最重要的专业术语或短语，并给出准确、简洁的简体中文译名。",
       "严格要求：term 必须是当前页原文中实际出现的英文形式；优先当前资料特有的方法名、课程概念、任务名、模型名和技术短语；不要输出 author、method、result、model、data 等过于泛化的单词；不要重复、改写或补充原文没有的术语。缩写可保留，并在中文译名中必要时说明全称。",
       "只输出严格 JSON，不要 Markdown 代码围栏，不要输出 JSON 以外的说明。结构必须是：{\"terms\":[{\"term\":\"原文术语\",\"translation\":\"准确中文译名\"}]}。",
@@ -250,7 +270,7 @@ function buildPrompt(payload) {
 
   if (!question) throw new Error("请输入问题");
   const common = [
-    "Use $paper-reader in explanation mode unless this is a repository implementation question.",
+    "Follow the PaperLens explanation rules below unless this is a repository implementation question.",
     "你是运行在 PaperLens 学习资料阅读工作台里的 AI 阅读助手。请用简体中文回答，先给直接结论，再解释依据。不要假装看过没有提供或没有查到的内容。",
     "公式输出规则：回答中的每一个数学公式都必须写成有效 LaTeX；行内公式使用 \\( ... \\)，独立公式使用 \\[ ... \\]。不要在分隔符外裸露下划线、花括号或 \\prod、\\sum 等 LaTeX 命令，也不要把公式放进 Markdown 代码围栏。对公式的解释要说明它表达的关系、主要变量以及上下标或求和/乘积范围；当前上下文没有定义的符号要明确指出，禁止猜测。",
     repairError ? `上一次 AI 任务失败：${repairError}。请诊断原因，修复后完成用户原始任务，不要只复述错误。` : "",
@@ -385,46 +405,14 @@ function providerHealth() {
     "local-codex": {
       id: "local-codex",
       label: "本机 Codex",
-      configured: codexAvailable,
+      configured: codexInstallation.installed,
       available: codexAvailable,
       busy: activity("local-codex").total > 0,
       activeTasks: activity("local-codex").channels,
       skillAvailable,
+      installation: codexInstallation,
+      account: codexAccountStatus,
       capabilities: { text: true, images: true, structuredOutput: true, repositoryVerification: true },
-    },
-    openai: {
-      id: "openai",
-      label: openAIProvider.label,
-      configured: openAIProvider.configured,
-      available: openAIProvider.configured,
-      busy: activity("openai").total > 0,
-      activeTasks: activity("openai").channels,
-      capabilities: openAIProvider.capabilities,
-      models: openAIProvider.models,
-      allowedModels: openAIProvider.allowedModels,
-      reasoningEffort: openAIProvider.reasoningEffort,
-    },
-    "cloudbase-hunyuan": {
-      id: "cloudbase-hunyuan",
-      label: cloudBaseHunyuanProvider.label,
-      configured: cloudBaseHunyuanProvider.configured,
-      available: cloudBaseHunyuanProvider.configured,
-      busy: activity("cloudbase-hunyuan").total > 0,
-      activeTasks: activity("cloudbase-hunyuan").channels,
-      capabilities: cloudBaseHunyuanProvider.capabilities,
-      models: cloudBaseHunyuanProvider.models,
-      allowedModels: cloudBaseHunyuanProvider.allowedModels,
-    },
-    mimo: {
-      id: "mimo",
-      label: mimoProvider.label,
-      configured: mimoProvider.configured,
-      available: mimoProvider.configured,
-      busy: activity("mimo").total > 0,
-      activeTasks: activity("mimo").channels,
-      capabilities: mimoProvider.capabilities,
-      models: mimoProvider.models,
-      allowedModels: mimoProvider.allowedModels,
     },
     "chatgpt-web": {
       id: "chatgpt-web",
@@ -436,58 +424,30 @@ function providerHealth() {
       capabilities: chatGPTWebProvider.capabilities,
       models: chatGPTWebProvider.models,
       allowedModels: chatGPTWebProvider.allowedModels,
+      pairingToken: chatGPTWebProvider.pairingToken,
     },
   };
 }
 
 function defaultProvider() {
   if (codexAvailable) return "local-codex";
-  if (cloudBaseHunyuanProvider.configured) return "cloudbase-hunyuan";
-  if (mimoProvider.configured) return "mimo";
-  if (openAIProvider.configured) return "openai";
+  if (chatGPTWebProvider.available) return "chatgpt-web";
   return "local-codex";
-}
-
-function normalizeModel(value, fallback, allowedModels) {
-  const candidate = compact(value, 80);
-  return allowedModels.includes(candidate) ? candidate : fallback;
 }
 
 async function invokeProvider(providerId, payload, requestOptions) {
   if (providerId === "chatgpt-web") {
     return chatGPTWebProvider.invoke(payload, { prompt: buildPrompt(payload), signal: requestOptions.signal });
   }
-  if (providerId === "cloudbase-hunyuan") {
-    const model = normalizeModel(
-      payload.mode === "translate" || payload.mode === "terms" ? requestOptions.translationModel : requestOptions.chatModel,
-      payload.mode === "translate" || payload.mode === "terms" ? cloudBaseHunyuanProvider.models.translation : cloudBaseHunyuanProvider.models.chat,
-      cloudBaseHunyuanProvider.allowedModels,
-    );
-    return cloudBaseHunyuanProvider.invoke(payload, { prompt: buildPrompt(payload), signal: requestOptions.signal, model });
+  await refreshCodexStatus();
+  if (!codexInstallation.installed) {
+    throw new ProviderError("未安装本机 Codex CLI", { code: "provider_not_configured", status: 503, provider: "local-codex" });
   }
-  if (providerId === "openai") {
-    const model = normalizeModel(
-      payload.mode === "translate" || payload.mode === "terms" ? requestOptions.translationModel : requestOptions.chatModel,
-      payload.mode === "translate" || payload.mode === "terms" ? openAIProvider.models.translation : openAIProvider.models.chat,
-      openAIProvider.allowedModels,
-    );
-    return openAIProvider.invoke(payload, {
-      prompt: buildPrompt(payload),
-      signal: requestOptions.signal,
-      model,
-      effort: requestOptions.reasoningEffort,
-    });
+  if (!codexAccountStatus.loggedIn) {
+    throw new ProviderError("本机 Codex 尚未登录 ChatGPT 账号", { code: "provider_not_configured", status: 503, provider: "local-codex" });
   }
-  if (providerId === "mimo") {
-    const model = normalizeModel(
-      payload.mode === "translate" || payload.mode === "terms" ? requestOptions.translationModel : requestOptions.chatModel,
-      payload.mode === "translate" || payload.mode === "terms" ? mimoProvider.models.translation : mimoProvider.models.chat,
-      mimoProvider.allowedModels,
-    );
-    return mimoProvider.invoke(payload, { prompt: buildPrompt(payload), signal: requestOptions.signal, model });
-  }
-  if (!codexAvailable) {
-    throw new ProviderError("未检测到本机 Codex CLI", { code: "provider_not_configured", status: 503, provider: "local-codex" });
+  if (codexAccountStatus.rateLimitReached) {
+    throw new ProviderError("本机 Codex 当前额度窗口已用尽，请等待重置后重试", { code: "quota_exceeded", status: 429, provider: "local-codex" });
   }
   const result = await runCodex(payload, { signal: requestOptions.signal });
   return { ...result, provider: "local-codex", model: "Codex CLI" };
@@ -501,18 +461,64 @@ const server = createServer(async (request, response) => {
     return;
   }
   if (request.method === "GET" && request.url === "/health") {
-    await chatGPTWebProvider.refreshStatus();
+    await Promise.all([chatGPTWebProvider.refreshStatus(), refreshCodexStatus()]);
     sendJson(response, 200, {
       ok: true,
       service: "PaperLens AI bridge",
+      edition: "local-two-connectors",
+      projectRoot: PROJECT_ROOT,
       defaultProvider: defaultProvider(),
       providers: providerHealth(),
+      extensionStoreUrl: /^https:\/\/chromewebstore\.google\.com\//.test(process.env.PAPERLENS_EXTENSION_STORE_URL || "")
+        ? process.env.PAPERLENS_EXTENSION_STORE_URL
+        : "",
       documentConversion: {
         available: documentConverter.available,
         engine: documentConverter.engine,
         formats: documentConverter.formats,
       },
     }, origin);
+    return;
+  }
+  if (request.method === "POST" && request.url === "/codex/login") {
+    try {
+      if (!codexInstallation.installed || !codexAccountClient) {
+        throw new ProviderError("未安装 Codex CLI，请先运行 npm run setup", { code: "provider_not_configured", status: 503, provider: "local-codex" });
+      }
+      const result = await codexAccountClient.startLogin();
+      codexStatusCheckedAt = 0;
+      sendJson(response, 200, { ok: true, loginId: result.loginId, authUrl: result.authUrl }, origin);
+    } catch (error) {
+      const normalized = normalizeProviderError(error, "local-codex");
+      sendJson(response, normalized.status, { error: normalized.message, code: normalized.code }, origin);
+    }
+    return;
+  }
+  if (request.method === "POST" && request.url === "/codex/logout") {
+    try {
+      if (!codexAccountClient) throw new Error("Codex CLI 未安装");
+      await codexAccountClient.logout();
+      codexStatusCheckedAt = 0;
+      await refreshCodexStatus({ force: true });
+      sendJson(response, 200, { ok: true }, origin);
+    } catch (error) {
+      const normalized = normalizeProviderError(error, "local-codex");
+      sendJson(response, normalized.status, { error: normalized.message, code: normalized.code }, origin);
+    }
+    return;
+  }
+  if (request.method === "POST" && request.url === "/setup/chatgpt-web") {
+    try {
+      const child = spawn(join(PROJECT_ROOT, "scripts", "open-chatgpt-web-setup.sh"), [], {
+        cwd: PROJECT_ROOT,
+        detached: true,
+        stdio: "ignore",
+      });
+      child.unref();
+      sendJson(response, 200, { ok: true }, origin);
+    } catch (error) {
+      sendJson(response, 500, { error: error instanceof Error ? error.message : "无法打开扩展安装向导" }, origin);
+    }
     return;
   }
   if (request.method === "POST" && request.url === "/convert-document") {
@@ -540,22 +546,15 @@ const server = createServer(async (request, response) => {
     try {
       const payload = await readJson(request);
       const providerId = PROVIDER_IDS.includes(payload.provider) ? payload.provider : "local-codex";
-      if (providerId === "openai") {
-        const result = await openAIProvider.testConnection();
-        sendJson(response, 200, { ...result, provider: providerId }, origin);
-      } else if (providerId === "cloudbase-hunyuan") {
-        const result = await cloudBaseHunyuanProvider.testConnection();
-        sendJson(response, 200, { ...result, provider: providerId }, origin);
-      } else if (providerId === "mimo") {
-        const result = await mimoProvider.testConnection();
-        sendJson(response, 200, { ...result, provider: providerId }, origin);
-      } else if (providerId === "chatgpt-web") {
+      if (providerId === "chatgpt-web") {
         const result = await chatGPTWebProvider.testConnection();
         sendJson(response, 200, { ...result, provider: providerId }, origin);
-      } else if (codexAvailable) {
-        sendJson(response, 200, { ok: true, provider: providerId, skillAvailable }, origin);
       } else {
-        throw new ProviderError("未检测到本机 Codex CLI", { code: "provider_not_configured", status: 503, provider: providerId });
+        await refreshCodexStatus({ force: true, refreshToken: true });
+        if (!codexInstallation.installed) throw new ProviderError("未安装本机 Codex CLI", { code: "provider_not_configured", status: 503, provider: providerId });
+        if (!codexAccountStatus.loggedIn) throw new ProviderError("本机 Codex 尚未登录", { code: "provider_not_configured", status: 503, provider: providerId });
+        if (codexAccountStatus.rateLimitReached) throw new ProviderError("本机 Codex 当前额度窗口已用尽", { code: "quota_exceeded", status: 429, provider: providerId });
+        sendJson(response, 200, { ok: true, provider: providerId, skillAvailable, account: codexAccountStatus }, origin);
       }
     } catch (error) {
       const normalized = normalizeProviderError(error, "unknown");
@@ -576,6 +575,7 @@ const server = createServer(async (request, response) => {
       throw new ProviderError("不支持的 AI 模式", { code: "invalid_mode", status: 400, provider: "unknown" });
     }
     const requestedProvider = PROVIDER_IDS.includes(payload.provider) ? payload.provider : "local-codex";
+    await refreshCodexStatus();
     const availability = Object.fromEntries(Object.entries(providerHealth()).map(([id, state]) => [id, state.available]));
     const route = resolveProviderRoute(payload, requestedProvider, availability);
     if (route.unsupportedReason) {
@@ -593,28 +593,11 @@ const server = createServer(async (request, response) => {
       chatModel: payload.chatModel,
       reasoningEffort: payload.reasoningEffort,
     };
-    let result;
-    let runtimeFallbackReason = "";
-    try {
-      result = await invokeProvider(activeProvider, route.payload, requestOptions);
-    } catch (error) {
-      const normalized = normalizeProviderError(error, activeProvider);
-      const canFallbackToMiMo = shouldFallbackToMiMo(activeProvider, normalized.code, {
-        mimo: mimoProvider.configured,
-      });
-      if (!canFallbackToMiMo) throw normalized;
-      const releaseFallback = requestActivity.start("mimo", route.payload.mode);
-      try {
-        result = await invokeProvider("mimo", route.payload, requestOptions);
-        runtimeFallbackReason = `CloudBase Hy3 暂不可用（${normalized.message}），已自动切换 MiMo`;
-      } finally {
-        releaseFallback();
-      }
-    }
+    const result = await invokeProvider(activeProvider, route.payload, requestOptions);
     sendJson(response, 200, {
       ...result,
       latencyMs: Date.now() - startedAt,
-      fallbackReason: runtimeFallbackReason || route.fallbackReason,
+      fallbackReason: route.fallbackReason,
       repositoryDecision: route.repositoryDecision || result.repositoryDecision,
     }, origin);
   } catch (error) {
@@ -633,3 +616,12 @@ const server = createServer(async (request, response) => {
 server.listen(PORT, HOST, () => {
   console.log(`PaperLens AI bridge: http://${HOST}:${PORT}`);
 });
+
+async function shutdown() {
+  codexAccountClient?.close();
+  await chatGPTWebProvider.close().catch(() => {});
+  server.close(() => process.exit(0));
+}
+
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);

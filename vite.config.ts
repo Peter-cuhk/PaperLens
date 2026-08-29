@@ -1,7 +1,7 @@
 import vinext from "vinext";
 import { defineConfig } from "vite";
-import hostingConfig from "./.openai/hosting.json";
-import { sites } from "./build/sites-vite-plugin";
+import hostingConfig from "./.openai/hosting.json" with { type: "json" };
+import { sites } from "./build/sites-vite-plugin.ts";
 
 const SITE_CREATOR_PLACEHOLDER_DATABASE_ID =
   "00000000-0000-4000-8000-000000000000";
@@ -10,6 +10,7 @@ const { d1, r2 } = hostingConfig;
 
 // macOS Seatbelt blocks FSEvents, so Codex previews need polling for HMR.
 const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
+const localCodexPort = process.env.PAPERLENS_CODEX_PORT || "43123";
 
 const localBindingConfig = {
   main: "./worker/index.ts",
@@ -53,7 +54,7 @@ export default defineConfig(async () => {
         : {}),
       proxy: {
         "/api/codex": {
-          target: "http://127.0.0.1:43123",
+          target: `http://127.0.0.1:${localCodexPort}`,
           changeOrigin: true,
           rewrite: (path: string) => path.replace(/^\/api\/codex/, ""),
         },

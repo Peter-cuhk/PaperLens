@@ -118,11 +118,11 @@ test("keeps local learning-material reading, direct Codex calls, scrolling, zoom
   assert.match(page, /translateFullPaper/);
   assert.match(page, /MAX_TRANSLATION_REPAIR_ATTEMPTS/);
   assert.match(page, /completeTranslationWithRepair/);
-  assert.match(page, /Codex 正在诊断并修复/);
+  assert.match(page, /当前接入内自动重试/);
   assert.match(page, /修复仍失败才会显示最终错误/);
-  assert.match(page, /runWithCodexRecovery/);
-  assert.match(aiRecovery, /provider: "local-codex"/);
-  assert.match(bridge, /这是第 \$\{repairAttempt\} 次 Codex 自动修复请求/);
+  assert.match(page, /runWithProviderRecovery/);
+  assert.doesNotMatch(aiRecovery, /provider: "local-codex"/);
+  assert.match(bridge, /这是第 \$\{repairAttempt\} 次自动修复请求/);
   assert.match(bridge, /不要只复述错误/);
   assert.match(page, /renderPdfPageForVision/);
   assert.match(page, /shouldUseVisualPageTranslation/);
@@ -144,7 +144,7 @@ test("keeps local learning-material reading, direct Codex calls, scrolling, zoom
   assert.match(page, /persistTranslations/);
   assert.match(page, /mode: activeRepositoryUrl \? "auto" : "chat"/);
   assert.match(page, /getTranslationSource\(requestPage, controller\.signal, requestGeneration, setChatStatus\)/);
-  assert.match(page, /onRepair: \(\) => setChatStatus\("AI 任务执行异常，Codex 正在诊断并修复…"\)/);
+  assert.match(page, /onRepair: \(\) => setChatStatus\(`AI 任务执行异常，\$\{effectiveProviderLabel\} 正在诊断并重试…`\)/);
   assert.match(page, /inspectPdfIdentity/);
   assert.match(page, /inferPaperTitle/);
   assert.match(page, /aliases: identity\.aliases/);
