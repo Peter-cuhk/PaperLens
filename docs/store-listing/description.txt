@@ -1,0 +1,22 @@
+PaperLens ChatGPT Web Bridge connects the locally running PaperLens reader to a ChatGPT conversation that remains visible in the user's Chrome browser.
+
+When the user explicitly starts a PaperLens task, the extension can:
+
+• Find or open a visible chatgpt.com tab.
+• Insert the current document context, selected passage, question, or a structured translation and terminology prompt into the visible Chat composer.
+• Upload only images that the user explicitly attached in PaperLens.
+• Wait until ChatGPT has stopped generating and the visible answer body has remained stable before returning that answer to PaperLens.
+
+The extension supports PaperLens question answering, page and full-document translation, terminology extraction, selected-passage explanation, and image-aware reading tasks. Translation and terminology use strict structured prompts so PaperLens can map the visible ChatGPT response back to the correct page segments.
+
+Privacy and security:
+
+• The extension does not request or store ChatGPT passwords, cookies, API keys, or authentication tokens.
+• It does not use private ChatGPT APIs or hidden background conversations.
+• It operates only on the visible ChatGPT page after a user-initiated PaperLens request.
+• A short-lived local pairing token restricts the bridge to the PaperLens instance running on the same computer.
+• Prompt content and explicitly attached images are sent only through the user's visible ChatGPT conversation.
+• The extension does not sell user data or use it for advertising, credit decisions, or unrelated purposes.
+
+PaperLens Local is open source. The local service and setup instructions are available at:
+https://github.com/Peter-cuhk/PaperLens
