@@ -35,6 +35,7 @@ async function fixture(t) {
   for (const name of ["dev.mjs", "vinext.mjs", "process-runner.mjs"]) {
     await copyFile(new URL(`scripts/${name}`, project), join(root, "scripts", name));
   }
+  await copyFile(new URL("bridge/process-tree.mjs", project), join(root, "bridge/process-tree.mjs"));
   await writeFile(join(root, "node_modules/vinext/package.json"), JSON.stringify({
     name: "vinext", type: "module", exports: "./dist/index.js",
   }));

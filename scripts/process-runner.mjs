@@ -1,54 +1,13 @@
-import { execFile, spawn } from "node:child_process";
-import { join } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
+import { stopProcessTree } from "../bridge/process-tree.mjs";
 
-const execFileAsync = promisify(execFile);
 const isWindows = process.platform === "win32";
 
 export function vinextArgs(args) {
   // The pinned Vinext package keeps its CLI beside its exported dist/index.js.
   // Invoke JavaScript with our Node executable, without an npm .cmd shim/shell.
   return [fileURLToPath(new URL("./cli.js", import.meta.resolve("vinext"))), ...args];
-}
-
-async function stopProcess({ child, closed }) {
-  if (!child.pid) return;
-
-  if (isWindows) {
-    if (child.exitCode !== null || child.signalCode !== null) return;
-    try {
-      // Only terminate the tree belonging to this launcher-owned process.
-      const taskkill = join(process.env.SystemRoot || "C:\\Windows", "System32", "taskkill.exe");
-      await execFileAsync(taskkill, ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true, timeout: 5000 });
-    } catch (error) {
-      // A service can exit while taskkill is starting.
-      if (child.exitCode === null && child.signalCode === null) {
-        child.kill();
-        throw error;
-      }
-    }
-  } else {
-    const signalGroup = (signal) => {
-      try {
-        process.kill(-child.pid, signal);
-      } catch (error) {
-        if (error.code !== "ESRCH") throw error;
-      }
-    };
-    signalGroup("SIGTERM");
-    const timeout = new AbortController();
-    try {
-      await Promise.race([closed, delay(2000, undefined, { signal: timeout.signal })]);
-    } finally {
-      timeout.abort();
-    }
-    // Also reap descendants if the service exits before its own children.
-    signalGroup("SIGKILL");
-  }
-
-  await closed;
 }
 
 export function runProcesses(commands, { cwd }) {
@@ -59,7 +18,7 @@ export function runProcesses(commands, { cwd }) {
     async function close(code) {
       if (closing) return;
       closing = true;
-      const results = await Promise.allSettled(children.map(stopProcess));
+      const results = await Promise.allSettled(children.map(stopProcessTree));
       for (const result of results) {
         if (result.status === "rejected") {
           console.error(`PaperLens: could not stop a child process: ${result.reason.message}`);

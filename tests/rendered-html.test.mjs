@@ -1,7 +1,5 @@
 import assert from "node:assert/strict";
 import { access, readFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import test from "node:test";
 
 async function render(pathname = "/") {
@@ -40,7 +38,7 @@ test("server-renders the PaperLens reader shell and metadata", async () => {
 });
 
 test("keeps local learning-material reading, direct Codex calls, scrolling, zoom, and mobile controls wired", async () => {
-  const [page, segmentation, translationResponse, aiRecovery, bridge, converter, devScript, usbGateway, layout, styles, skill, pdfWorker] = await Promise.all([
+  const [page, segmentation, translationResponse, aiRecovery, bridge, converter, devScript, usbGateway, layout, styles, pdfWorker] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/page-segmentation.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/translation-response.ts", import.meta.url), "utf8"),
@@ -51,7 +49,6 @@ test("keeps local learning-material reading, direct Codex calls, scrolling, zoom
     readFile(new URL("../scripts/usb-gateway.mjs", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
-    readFile(join(homedir(), ".codex", "skills", "paper-reader", "SKILL.md"), "utf8"),
     readFile(new URL("../public/pdf.worker.min.mjs", import.meta.url), "utf8"),
   ]);
 
@@ -250,7 +247,7 @@ test("keeps local learning-material reading, direct Codex calls, scrolling, zoom
   assert.match(page, /onMouseMove=\{\(\) =>/);
   assert.doesNotMatch(page, /copyForCodex|openPaste|粘贴当前页译文/);
 
-  assert.match(bridge, /spawn\(codexPath/);
+  assert.match(bridge, /runCodexCommand\(installation/);
   assert.match(bridge, /materializeImages/);
   assert.match(bridge, /requestActivity\.start\(activeProvider, route\.payload\.mode\)/);
   assert.doesNotMatch(bridge, /code: "provider_busy"/);
@@ -338,8 +335,6 @@ test("keeps local learning-material reading, direct Codex calls, scrolling, zoom
   assert.match(styles, /\.translated-math\.display/);
   assert.match(styles, /\.tutorial-link/);
   assert.match(styles, /\.formula-explanation/);
-  assert.match(skill, /name: paper-reader/);
-  assert.match(skill, /## Verify repository claims/);
   assert.match(pdfWorker, /getOrInsertComputed/);
 
   await access(new URL("../public/pdf.worker.min.mjs", import.meta.url));
