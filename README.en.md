@@ -91,7 +91,7 @@ Open <http://localhost:3000> and check the bridge from a second PowerShell windo
 Invoke-RestMethod http://127.0.0.1:43123/health
 ```
 
-`ok: true` and `service: "PaperLens AI bridge"` confirm that the bridge is running. Windows support currently covers development startup, builds, and Web startup. Codex discovery/invocation, Office conversion, and iPad USB access still need separate adaptation and validation. Thus `providers.local-codex.available: false` or `USB: waiting…` does not indicate a Web startup failure. Startup checks do not require an AI login.
+`ok: true` and `service: "PaperLens AI bridge"` confirm that the bridge is running. Windows support currently covers development startup, builds, Web startup, and the Office conversion described below. Codex discovery/invocation and iPad USB access still need separate adaptation and validation. Thus `providers.local-codex.available: false` or `USB: waiting…` does not indicate a Web startup failure. Startup checks do not require an AI login.
 
 Press `Ctrl+C` in the service terminal to stop the services started by that command. Forward development options after `--`, for example `npm run dev -- --port 3001`. Project paths may contain spaces or Chinese characters.
 
@@ -105,6 +105,34 @@ npm run start -- --hostname localhost
 `start` runs only the built Web service, without the AI bridge or USB gateway. Use `npm run dev` for the local reading development workflow.
 
 If PowerShell refuses to load `npm.ps1`, use `npm.cmd` in place of `npm` in these commands; no execution-policy change is needed.
+
+#### Word/PPT conversion on Windows
+
+Install the Windows version from the [LibreOffice website](https://www.libreoffice.org/download/), then restart PaperLens. PDF reading does not require LibreOffice. The bridge searches `PATH` first, followed by `LibreOffice\program` under `ProgramW6432`, `ProgramFiles`, and `ProgramFiles(x86)`. Within each directory it prefers `soffice.com`, then `soffice.exe`. The [LibreOffice command-line guide](https://help.libreoffice.org/latest/en-US/text/shared/guide/start_parameters.html) recommends `soffice.com` for Windows console tasks.
+
+For a custom installation, set the full path in the project's `.env` (spaces, Chinese characters, and backslashes are supported):
+
+```dotenv
+PAPERLENS_SOFFICE_PATH="D:\应用程序\LibreOffice\program\soffice.com"
+```
+
+Alternatively, set it for the current PowerShell session:
+
+```powershell
+$env:PAPERLENS_SOFFICE_PATH = 'C:\Program Files\LibreOffice\program\soffice.com'
+& $env:PAPERLENS_SOFFICE_PATH --version
+npm run dev
+```
+
+An explicit path takes priority. A missing or misspelled path does not silently fall back to another installation. Restart the bridge after changing its configuration, then check:
+
+```powershell
+(Invoke-RestMethod http://127.0.0.1:43123/health).documentConversion
+```
+
+`available: true` means the converter was found; `engine: "LibreOffice"` identifies the engine. Each conversion runs in the background with its own temporary directory and LibreOffice user profile. A timeout (120 seconds by default), disconnected request, or graceful bridge shutdown stops that conversion's process tree and waits for exit before removing temporary files. Existing LibreOffice windows use other profiles and are not stopped by executable name.
+
+The repository's DOCX/PPTX and legacy DOC/PPT samples were validated on Windows 11 x64, Node.js 24, and LibreOffice 26.8.0.3: English/Chinese text, tables, two-page documents/slides, and paths containing spaces and Chinese characters. Complex layouts, embedded objects, macros, and encrypted documents need validation with the actual material. Rendering also depends on LibreOffice and installed fonts.
 
 ### macOS first-run check
 
@@ -129,6 +157,7 @@ npm run bridge
 
 ```bash
 npm run test:startup
+npm run test:office
 npm run build
 npm run test:startup-smoke
 npm run typecheck
@@ -136,6 +165,8 @@ npm run lint
 ```
 
 `test:startup` uses isolated fixture services to check arguments, paths with spaces/Chinese characters, failures, and process cleanup. After a build, `test:startup-smoke` starts the actual development/production Web services, checks the reader and bridge, then stops them. Neither command requests AI inference or document conversion.
+
+`test:office` uses fixture processes to check discovery, failed output, timeouts/cancellation, temporary-file cleanup, and the bridge concurrency limit. It does not require LibreOffice. With LibreOffice installed, run `npm run test:office-smoke` to convert all four Office sample formats and check page counts and English/Chinese text using PDF.js. This command fails if LibreOffice is missing and is not part of default CI. See [tests/fixtures/office/README.md](tests/fixtures/office/README.md) for the samples.
 
 GitHub Actions runs these checks on Windows and macOS with Node.js 22 and 24, checking out the project into a path containing spaces and Chinese characters. The full suite remains `npm test`; its existing mock Codex CLI uses a Unix shebang, and a source-level reader test reads a personal `paper-reader/SKILL.md`. Those prerequisites can still fail on a clean Windows machine and are outside the passing startup checks in this change.
 

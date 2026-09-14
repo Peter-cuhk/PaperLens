@@ -91,7 +91,7 @@ npm run dev
 Invoke-RestMethod http://127.0.0.1:43123/health
 ```
 
-`ok: true` 和 `service: "PaperLens AI bridge"` 表示 bridge 已启动。当前 Windows 适配覆盖开发启动、构建和 Web 启动；Codex 自动发现与调用、Office 转换以及 iPad USB 连接仍待单独适配和验证。因此 `providers.local-codex.available: false` 或 `USB: waiting…` 不代表网页启动失败，启动检查也不需要登录 AI 账户。
+`ok: true` 和 `service: "PaperLens AI bridge"` 表示 bridge 已启动。当前 Windows 适配覆盖开发启动、构建、Web 启动及下述 Office 转换；Codex 自动发现与调用、iPad USB 连接仍待单独适配和验证。因此 `providers.local-codex.available: false` 或 `USB: waiting…` 不代表网页启动失败，启动检查也不需要登录 AI 账户。
 
 在运行服务的窗口按 `Ctrl+C` 停止本次启动的服务。开发参数通过 `--` 转发，例如 `npm run dev -- --port 3001`。项目目录可以包含空格或中文。
 
@@ -105,6 +105,34 @@ npm run start -- --hostname localhost
 `start` 只启动构建后的 Web 服务，不会启动 AI bridge 或 USB gateway。日常本机阅读开发流程使用 `npm run dev`。
 
 如果 PowerShell 提示无法加载 `npm.ps1`，可在上述命令中把 `npm` 换成 `npm.cmd`，无需修改系统执行策略。
+
+#### Windows Word/PPT 转换
+
+从 [LibreOffice 官网](https://www.libreoffice.org/download/)安装 Windows 版本后重启 PaperLens。只阅读 PDF 时无需安装 LibreOffice。bridge 会先搜索 `PATH`，再检查 `ProgramW6432`、`ProgramFiles` 和 `ProgramFiles(x86)` 下的 `LibreOffice\program`，同一目录优先使用 `soffice.com`，其次为 `soffice.exe`。[LibreOffice 命令行说明](https://help.libreoffice.org/latest/en-US/text/shared/guide/start_parameters.html)建议 Windows 命令行任务使用 `soffice.com`。
+
+使用其他安装目录时，可以在项目的 `.env` 中设置完整路径（支持空格、中文和反斜杠）：
+
+```dotenv
+PAPERLENS_SOFFICE_PATH="D:\应用程序\LibreOffice\program\soffice.com"
+```
+
+也可以只为当前 PowerShell 窗口设置：
+
+```powershell
+$env:PAPERLENS_SOFFICE_PATH = 'C:\Program Files\LibreOffice\program\soffice.com'
+& $env:PAPERLENS_SOFFICE_PATH --version
+npm run dev
+```
+
+显式路径优先；如果路径拼错或文件不存在，不会自动改用另一份安装。修改配置后重启 bridge，再检查：
+
+```powershell
+(Invoke-RestMethod http://127.0.0.1:43123/health).documentConversion
+```
+
+`available: true` 表示找到转换程序，`engine: "LibreOffice"` 表示所用引擎。导入 Office 文件时会在后台转换，并为每次任务创建独立临时目录和 LibreOffice 用户配置。转换超时（默认 120 秒）、请求断开或 bridge 正常退出时，会停止本次转换的进程树，等待进程退出后再清理临时文件。已有 LibreOffice 窗口使用其他配置，不会按程序名统一关闭。
+
+Windows 11 x64、Node.js 24、LibreOffice 26.8.0.3 已验证仓库内的 DOCX/PPTX 及旧版 DOC/PPT 样例：中文与英文文字、表格、两页文档／幻灯片、含空格和中文的路径。复杂排版、嵌入对象、宏和加密文档仍需按实际资料验证；转换效果取决于 LibreOffice 与本机字体。
 
 ### macOS 首次启动检查
 
@@ -129,6 +157,7 @@ npm run bridge
 
 ```bash
 npm run test:startup
+npm run test:office
 npm run build
 npm run test:startup-smoke
 npm run typecheck
@@ -136,6 +165,8 @@ npm run lint
 ```
 
 `test:startup` 使用独立模拟服务验证参数、中文／空格路径、失败处理和进程清理；`test:startup-smoke` 需要先构建，会启动真实开发／生产 Web 服务、检查页面和 bridge，再停止服务。两者均不会发起 AI 推理或文档转换。
+
+`test:office` 使用模拟转换进程，覆盖查找路径、错误输出、超时／取消、临时文件清理和 bridge 并发限制，无需安装 LibreOffice。安装真实 LibreOffice 后，可运行 `npm run test:office-smoke`，转换仓库内四种 Office 格式的样例，并用 PDF.js 检查页数、英文及中文文字；此命令在未检测到 LibreOffice 时会失败，不包含在默认 CI 中。样例说明见 [tests/fixtures/office/README.md](tests/fixtures/office/README.md)。
 
 GitHub Actions 在 Windows 和 macOS、Node.js 22 和 24 上执行上述检查，并将仓库放在带空格和中文的目录中。完整测试命令仍为 `npm test`；其中现有 Codex 模拟 CLI 测试使用 Unix shebang，页面源码测试还依赖个人目录的 `paper-reader/SKILL.md`，干净 Windows 环境仍可能因这两项前置条件失败。这些问题不属于本轮启动适配的通过项。
 

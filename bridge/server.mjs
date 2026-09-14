@@ -30,6 +30,14 @@ const ALLOWED_ORIGINS = new Set([
   "http://localhost:3000",
   "http://127.0.0.1:3000",
 ]);
+const shutdown = new AbortController();
+let server;
+const stopBridge = () => {
+  shutdown.abort();
+  server?.close();
+};
+process.once("SIGINT", stopBridge);
+process.once("SIGTERM", stopBridge);
 
 let codexPath = "codex";
 let codexAvailable = false;
@@ -526,7 +534,7 @@ async function invokeProvider(providerId, payload, requestOptions) {
   return { ...result, provider: "local-codex", model: model || "默认模型", reasoningEffort };
 }
 
-const server = createServer(async (request, response) => {
+server = createServer(async (request, response) => {
   const origin = request.headers.origin || "";
   if (request.method === "OPTIONS") {
     response.writeHead(204, corsHeaders(origin));
@@ -552,6 +560,11 @@ const server = createServer(async (request, response) => {
   }
   if (request.method === "POST" && request.url === "/convert-document") {
     let acquiredConverter = false;
+    const controller = new AbortController();
+    const onAborted = () => controller.abort();
+    const onClosed = () => { if (!response.writableEnded) controller.abort(); };
+    request.once("aborted", onAborted);
+    response.once("close", onClosed);
     try {
       if (documentConversionActive) {
         throw new DocumentConversionError("正在转换上一个文档，请稍候再试", { code: "converter_busy", status: 429 });
@@ -560,13 +573,18 @@ const server = createServer(async (request, response) => {
       acquiredConverter = true;
       const fileName = decodeFileName(request.headers["x-paperlens-file-name"]);
       const bytes = await readBytes(request);
-      const result = await documentConverter.convert(bytes, fileName);
+      if (request.aborted || response.destroyed) controller.abort();
+      const result = await documentConverter.convert(bytes, fileName, {
+        signal: AbortSignal.any([controller.signal, shutdown.signal]),
+      });
       sendPdf(response, result, origin);
     } catch (error) {
       const status = error instanceof DocumentConversionError ? error.status : 500;
       const code = error instanceof DocumentConversionError ? error.code : "conversion_failed";
       sendJson(response, status, { error: error instanceof Error ? error.message : "文档转换失败", code }, origin);
     } finally {
+      request.removeListener("aborted", onAborted);
+      response.removeListener("close", onClosed);
       if (acquiredConverter) documentConversionActive = false;
     }
     return;
@@ -668,6 +686,6 @@ const server = createServer(async (request, response) => {
   }
 });
 
-server.listen(PORT, HOST, () => {
+if (!shutdown.signal.aborted) server.listen(PORT, HOST, () => {
   console.log(`PaperLens AI bridge: http://${HOST}:${PORT}`);
 });

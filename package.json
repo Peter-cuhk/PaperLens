@@ -13,6 +13,8 @@
     "start": "node scripts/vinext.mjs start",
     "test:startup": "node --test tests/startup.test.mjs",
     "test:startup-smoke": "node --test tests/startup-smoke.test.mjs",
+    "test:office": "node --test tests/document-converter.test.mjs tests/document-converter-bridge.test.mjs",
+    "test:office-smoke": "node --test tests/office-conversion.smoke.mjs",
     "test": "npm run build && node --test tests/*.test.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
