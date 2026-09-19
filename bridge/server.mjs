@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -14,6 +13,7 @@ import { createOpenAIProvider } from "./providers/openai.mjs";
 import { createDocumentConverter, DocumentConversionError } from "./document-converter.mjs";
 import { readCodexModelCatalog, codexModelForRequest, codexEffortForRequest } from "./codex-models.mjs";
 import { createRequestActivityTracker } from "./request-activity.mjs";
+import { detectCodexInstallation, readCodexLoginStatus, runCodexCommand } from "./codex-cli.mjs";
 
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.PAPERLENS_CODEX_PORT || 43123);
@@ -23,7 +23,6 @@ try {
 } catch (error) {
   if (error?.code !== "ENOENT") throw error;
 }
-const CODEX_CANDIDATES = [process.env.PAPERLENS_CODEX_PATH, "/Applications/ChatGPT.app/Contents/Resources/codex", "/opt/homebrew/bin/codex", "/usr/local/bin/codex"].filter(Boolean);
 const CODEX_ROOT = process.env.CODEX_HOME || join(homedir(), ".codex");
 const PAPER_READER_SKILL = process.env.PAPERLENS_SKILL_PATH || join(CODEX_ROOT, "skills", "paper-reader", "SKILL.md");
 const ALLOWED_ORIGINS = new Set([
@@ -39,22 +38,28 @@ const stopBridge = () => {
 process.once("SIGINT", stopBridge);
 process.once("SIGTERM", stopBridge);
 
-let codexPath = "codex";
+let codexInstallation;
+let codexLogin;
 let codexAvailable = false;
+let codexCheckedAt = 0;
+let codexRefresh;
 const requestActivity = createRequestActivityTracker();
 let documentConversionActive = false;
 let skillAvailable = false;
 
-for (const candidate of CODEX_CANDIDATES) {
-  try {
-    await access(candidate);
-    codexPath = candidate;
-    codexAvailable = true;
-    break;
-  } catch {
-    // Continue to the next known installation path.
-  }
+async function refreshCodexStatus(force = false) {
+  if (codexRefresh) return codexRefresh;
+  if (!force && Date.now() - codexCheckedAt < 10_000) return;
+  codexRefresh = (async () => {
+    codexInstallation = await detectCodexInstallation({ cwd: PROJECT_ROOT, signal: shutdown.signal });
+    codexLogin = await readCodexLoginStatus(codexInstallation, { cwd: PROJECT_ROOT, signal: shutdown.signal });
+    codexAvailable = codexInstallation.installed && codexLogin.loggedIn;
+    codexCheckedAt = Date.now();
+  })();
+  try { await codexRefresh; }
+  finally { codexRefresh = undefined; }
 }
+await refreshCodexStatus();
 
 let codexCatalog = await readCodexModelCatalog(CODEX_ROOT);
 let codexModels = Object.keys(codexCatalog);
@@ -327,12 +332,11 @@ function extractRepositoryDecision(answer, mode) {
   return { answer: cleaned, repositoryDecision: mode === "auto" ? "unreported" : "not-applicable" };
 }
 
-async function runCodex(payload, { signal, model, reasoningEffort } = {}) {
+async function runCodex(payload, { signal, model, reasoningEffort, installation } = {}) {
   const imageBundle = await materializeImages(payload);
   try {
     const skillInstructions = payload.mode === "translate" && skillAvailable
       ? await readFile(PAPER_READER_SKILL, "utf8") : "";
-    return await new Promise((resolve, reject) => {
     const repositoryMode = payload.mode === "repository" || payload.mode === "auto";
     // --search is a top-level Codex CLI option and must appear before `exec`.
     const args = repositoryMode ? ["--search", "exec"] : ["exec"];
@@ -343,72 +347,40 @@ async function runCodex(payload, { signal, model, reasoningEffort } = {}) {
     for (const path of imageBundle.paths) args.push("--image", path);
     args.push("-C", PROJECT_ROOT, "-");
 
-    const child = spawn(codexPath, args, {
-      cwd: PROJECT_ROOT,
-      env: { ...process.env, NO_COLOR: "1" },
-      stdio: ["pipe", "pipe", "pipe"],
-    });
     const prompt = [skillInstructions, buildPrompt(payload)].filter(Boolean).join("\n\n");
+    const { code, stdout, stderr } = await runCodexCommand(installation, args, {
+      cwd: PROJECT_ROOT,
+      input: prompt,
+      signal,
+      timeoutMs: repositoryMode ? 360_000 : 240_000,
+    });
     const answers = [];
     let threadId = "";
-    let stdoutBuffer = "";
-    let stderr = "";
     let invocationError = "";
-    let settled = false;
-
-    const abort = () => {
-      if (settled) return;
-      child.kill("SIGTERM");
-      reject(new ProviderError("请求已取消", { code: "request_aborted", status: 499, provider: "local-codex" }));
-    };
-    signal?.addEventListener("abort", abort, { once: true });
-
-    const timeout = setTimeout(() => {
-      child.kill("SIGTERM");
-      reject(new ProviderError("Codex 响应超时，请稍后重试", { code: "upstream_timeout", status: 504, retryable: true, provider: "local-codex" }));
-    }, repositoryMode ? 360_000 : 240_000);
-
-    child.stdout.on("data", (chunk) => {
-      stdoutBuffer += chunk.toString("utf8");
-      const lines = stdoutBuffer.split("\n");
-      stdoutBuffer = lines.pop() || "";
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        try {
-          const event = JSON.parse(line);
-          if (event.type === "error" || event.type === "turn.failed") {
-            invocationError = event.error?.message || event.message || invocationError;
-            try {
-              const detail = JSON.parse(invocationError);
-              invocationError = detail.error?.message || detail.message || invocationError;
-            } catch { /* The error may already be plain text. */ }
-          }
-          if (event.type === "thread.started") threadId = event.thread_id || "";
-          if (event.type === "item.completed" && event.item?.type === "agent_message" && event.item.text) {
-            answers.push(event.item.text);
-          }
-        } catch {
-          // Codex may emit non-JSON diagnostics; they are captured in stderr instead.
+    // Decode UTF-8 in the process runner, and include a final line without LF.
+    for (const line of stdout.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const event = JSON.parse(line);
+        if (event.type === "error" || event.type === "turn.failed") {
+          invocationError = event.error?.message || event.message || invocationError;
+          try {
+            const detail = JSON.parse(invocationError);
+            invocationError = detail.error?.message || detail.message || invocationError;
+          } catch { /* The error may already be plain text. */ }
         }
+        if (event.type === "thread.started") threadId = event.thread_id || "";
+        if (event.type === "item.completed" && event.item?.type === "agent_message" && event.item.text) {
+          answers.push(event.item.text);
+        }
+      } catch {
+        // Ignore non-JSON diagnostics; errors also arrive on stderr.
       }
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr = `${stderr}${chunk.toString("utf8")}`.slice(-12_000);
-    });
-    child.on("error", (error) => {
-      clearTimeout(timeout);
-      signal?.removeEventListener("abort", abort);
-      if (!settled) reject(error);
-    });
-    child.on("close", (code) => {
-      clearTimeout(timeout);
-      signal?.removeEventListener("abort", abort);
-      settled = true;
-      const answer = answers.at(-1)?.trim();
-      if (code === 0 && answer) resolve({ ...extractRepositoryDecision(answer, payload.mode), threadId });
-      else reject(new Error(invocationError || stderr.trim().split("\n").at(-1) || `Codex 退出，状态码 ${code}`));
-    });
-    child.stdin.end(prompt);
+    }
+    const answer = answers.at(-1)?.trim();
+    if (code === 0 && answer) return { ...extractRepositoryDecision(answer, payload.mode), threadId };
+    throw new ProviderError(invocationError || stderr.split("\n").at(-1) || `Codex 未返回答案，退出状态码 ${code}`, {
+      code: "codex_exec_failed", status: 502, provider: "local-codex",
     });
   } finally {
     if (imageBundle.directory) await rm(imageBundle.directory, { recursive: true, force: true });
@@ -421,8 +393,13 @@ function providerHealth() {
     "local-codex": {
       id: "local-codex",
       label: "本机 Codex",
-      configured: codexAvailable,
+      configured: codexInstallation.installed,
+      installed: codexInstallation.installed,
+      loggedIn: codexLogin.loggedIn,
+      version: codexInstallation.version,
       available: codexAvailable,
+      error: codexLogin.error?.message,
+      code: codexLogin.error?.code,
       busy: activity("local-codex").total > 0,
       activeTasks: activity("local-codex").channels,
       skillAvailable,
@@ -526,11 +503,11 @@ async function invokeProvider(providerId, payload, requestOptions) {
     return mimoProvider.invoke(payload, { prompt: buildPrompt(payload), signal: requestOptions.signal, model });
   }
   if (!codexAvailable) {
-    throw new ProviderError("未检测到本机 Codex CLI", { code: "provider_not_configured", status: 503, provider: "local-codex" });
+    throw codexLogin.error;
   }
   const model = codexModelForRequest(payload.mode, requestOptions, codexModels);
   const reasoningEffort = codexEffortForRequest(payload.mode, requestOptions, model, codexCatalog);
-  const result = await runCodex(payload, { signal: requestOptions.signal, model, reasoningEffort });
+  const result = await runCodex(payload, { signal: requestOptions.signal, model, reasoningEffort, installation: codexInstallation });
   return { ...result, provider: "local-codex", model: model || "默认模型", reasoningEffort };
 }
 
@@ -542,6 +519,7 @@ server = createServer(async (request, response) => {
     return;
   }
   if (request.method === "GET" && request.url === "/health") {
+    await refreshCodexStatus();
     codexCatalog = await readCodexModelCatalog(CODEX_ROOT);
     codexModels = Object.keys(codexCatalog);
     await chatGPTWebProvider.refreshStatus();
@@ -605,10 +583,10 @@ server = createServer(async (request, response) => {
       } else if (providerId === "chatgpt-web") {
         const result = await chatGPTWebProvider.testConnection();
         sendJson(response, 200, { ...result, provider: providerId }, origin);
-      } else if (codexAvailable) {
-        sendJson(response, 200, { ok: true, provider: providerId, skillAvailable }, origin);
       } else {
-        throw new ProviderError("未检测到本机 Codex CLI", { code: "provider_not_configured", status: 503, provider: providerId });
+        await refreshCodexStatus(true);
+        if (!codexAvailable) throw codexLogin.error;
+        sendJson(response, 200, { ok: true, provider: providerId, skillAvailable, version: codexInstallation.version, loggedIn: true }, origin);
       }
     } catch (error) {
       const normalized = normalizeProviderError(error, "unknown");
@@ -629,6 +607,11 @@ server = createServer(async (request, response) => {
       throw new ProviderError("不支持的 AI 模式", { code: "invalid_mode", status: 400, provider: "unknown" });
     }
     const requestedProvider = PROVIDER_IDS.includes(payload.provider) ? payload.provider : "local-codex";
+    const controller = new AbortController();
+    request.on("aborted", () => controller.abort());
+    response.on("close", () => { if (!response.writableEnded) controller.abort(); });
+    if (request.aborted || response.destroyed) controller.abort();
+    await refreshCodexStatus(requestedProvider === "local-codex");
     const availability = Object.fromEntries(Object.entries(providerHealth()).map(([id, state]) => [id, state.available]));
     const route = resolveProviderRoute(payload, requestedProvider, availability);
     if (route.unsupportedReason) {
@@ -636,12 +619,9 @@ server = createServer(async (request, response) => {
     }
     activeProvider = route.provider;
     releaseActiveProvider = requestActivity.start(activeProvider, route.payload.mode);
-    const controller = new AbortController();
-    request.on("aborted", () => controller.abort());
-    response.on("close", () => { if (!response.writableEnded) controller.abort(); });
     const startedAt = Date.now();
     const requestOptions = {
-      signal: controller.signal,
+      signal: AbortSignal.any([controller.signal, shutdown.signal]),
       provider: requestedProvider,
       translationModel: payload.translationModel,
       chatModel: payload.chatModel,

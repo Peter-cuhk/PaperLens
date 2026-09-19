@@ -46,7 +46,7 @@ PDFs are read in the browser. Office files are converted locally. The AI bridge 
 
 ## Requirements
 
-- macOS; Windows 11 x64 supports development startup and builds within the scope described below
+- macOS; Windows 11 x64 supports development startup, builds, and local Codex within the scope described below
 - Node.js `>= 22.13.0`
 - npm
 - A logged-in [Codex CLI](https://developers.openai.com/codex/cli/) for local AI features
@@ -91,7 +91,7 @@ Open <http://localhost:3000> and check the bridge from a second PowerShell windo
 Invoke-RestMethod http://127.0.0.1:43123/health
 ```
 
-`ok: true` and `service: "PaperLens AI bridge"` confirm that the bridge is running. Windows support currently covers development startup, builds, Web startup, and the Office conversion described below. Codex discovery/invocation and iPad USB access still need separate adaptation and validation. Thus `providers.local-codex.available: false` or `USB: waiting…` does not indicate a Web startup failure. Startup checks do not require an AI login.
+`ok: true` and `service: "PaperLens AI bridge"` confirm that the bridge is running. Windows support covers development startup, builds, Web startup, and local Codex and Office conversion as described below. iPad USB access still needs separate adaptation and validation. `providers.local-codex.available: false` or `USB: waiting…` does not indicate a Web startup failure. Startup checks do not require an AI login.
 
 Press `Ctrl+C` in the service terminal to stop the services started by that command. Forward development options after `--`, for example `npm run dev -- --port 3001`. Project paths may contain spaces or Chinese characters.
 
@@ -106,7 +106,36 @@ npm run start -- --hostname localhost
 
 If PowerShell refuses to load `npm.ps1`, use `npm.cmd` in place of `npm` in these commands; no execution-policy change is needed.
 
-#### Word/PPT conversion on Windows
+### Local Codex on Windows
+
+After installing Codex CLI, check its version and login status in a terminal. For an npm installation, these commands avoid PowerShell's `.ps1` execution policy:
+
+```powershell
+codex.cmd --version
+codex.cmd login status
+# If signed out, run codex.cmd login
+```
+
+PaperLens uses `PAPERLENS_CODEX_PATH` first, otherwise searches PATH. On Windows it supports `codex.exe` and the standard npm `codex.cmd` / `codex.ps1` shims. npm shims resolve to `@openai/codex/bin/codex.js`, which runs through the current Node executable. Prompts use stdin; arguments and image paths remain separate, including spaces and Chinese characters. macOS keeps PATH, the ChatGPT application CLI, and Homebrew discovery.
+
+If the CLI is outside PATH, set an absolute path in the same PowerShell terminal before starting PaperLens, or fill in `PAPERLENS_CODEX_PATH` in `.env`:
+
+```powershell
+$env:PAPERLENS_CODEX_PATH = 'C:\Tools\Codex\codex.exe'
+npm run dev
+```
+
+The override also accepts a standard npm `codex.cmd` or Codex's JavaScript entry. An invalid explicit path produces an error. For custom `.cmd` / `.bat` / `.ps1` wrappers, specify the underlying executable or JavaScript entry instead. After changing PATH or environment variables, open a new terminal and restart PaperLens.
+
+```powershell
+(Invoke-RestMethod http://127.0.0.1:43123/health).providers.'local-codex'
+```
+
+`installed` means the CLI passed its version check; `loggedIn` means `codex login status` succeeded; `available` requires both. Health checks cache results for up to 10 seconds. “Test connection” and local AI requests recheck the status, so signing in does not require a service restart. `error` / `code` distinguish a missing path, startup failure, and a signed-out CLI. Login checks do not validate server-side quota or model access; inference can still fail. PaperLens reuses CLI authentication (respecting `CODEX_HOME`), without reading or copying credential contents or signing in on your behalf.
+
+Translation, terms, and ordinary chat keep `--ignore-user-config`; repository verification keeps the existing search/config behavior. All modes retain `read-only` and `--ephemeral`. The `paper-reader` Skill is optional: a missing file does not prevent bridge startup or fixture tests. Cancellation and timeouts stop this CLI and its descendants, wait for exit, then remove temporary image files.
+
+### Word/PPT conversion on Windows
 
 Install the Windows version from the [LibreOffice website](https://www.libreoffice.org/download/), then restart PaperLens. PDF reading does not require LibreOffice. The bridge searches `PATH` first, followed by `LibreOffice\program` under `ProgramW6432`, `ProgramFiles`, and `ProgramFiles(x86)`. Within each directory it prefers `soffice.com`, then `soffice.exe`. The [LibreOffice command-line guide](https://help.libreoffice.org/latest/en-US/text/shared/guide/start_parameters.html) recommends `soffice.com` for Windows console tasks.
 
@@ -153,22 +182,19 @@ To start only the bridge:
 npm run bridge
 ```
 
-### Startup compatibility checks
+### Compatibility checks
 
 ```bash
-npm run test:startup
-npm run test:office
-npm run build
-npm run test:startup-smoke
+npm test
 npm run typecheck
 npm run lint
 ```
 
-`test:startup` uses isolated fixture services to check arguments, paths with spaces/Chinese characters, failures, and process cleanup. After a build, `test:startup-smoke` starts the actual development/production Web services, checks the reader and bridge, then stops them. Neither command requests AI inference or document conversion.
+`npm test` builds and runs the full suite, including Office fixture conversion, startup, Codex discovery, login state, arguments/images, errors, and process cleanup. Codex tests use an isolated JavaScript fixture CLI. They require neither a personal Skill nor a logged-in AI account and do not request AI inference. Real translation and chat require separate acceptance checks.
 
 `test:office` uses fixture processes to check discovery, failed output, timeouts/cancellation, temporary-file cleanup, and the bridge concurrency limit. It does not require LibreOffice. With LibreOffice installed, run `npm run test:office-smoke` to convert all four Office sample formats and check page counts and English/Chinese text using PDF.js. This command fails if LibreOffice is missing and is not part of default CI. See [tests/fixtures/office/README.md](tests/fixtures/office/README.md) for the samples.
 
-GitHub Actions runs these checks on Windows and macOS with Node.js 22 and 24, checking out the project into a path containing spaces and Chinese characters. The full suite remains `npm test`; its existing mock Codex CLI uses a Unix shebang, and a source-level reader test reads a personal `paper-reader/SKILL.md`. Those prerequisites can still fail on a clean Windows machine and are outside the passing startup checks in this change.
+GitHub Actions runs these checks on Windows and macOS with Node.js 22 and 24, checking out the project into a path containing spaces and Chinese characters. You can still run `npm run test:startup` on its own. After a build, `npm run test:startup-smoke` starts the actual development/production Web services, checks the reader and bridge, then stops them.
 
 ## Usage
 

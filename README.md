@@ -46,7 +46,7 @@ PDF 由浏览器本地读取；Office 文件只在本机转换。AI bridge 仅�
 
 ## 环境要求
 
-- macOS；Windows 11 64 位已支持开发启动与构建，功能范围见下方 Windows 说明
+- macOS；Windows 11 64 位支持开发启动、构建和本机 Codex，功能范围见下方 Windows 说明
 - Node.js `>= 22.13.0`
 - npm
 - 使用本机 AI 功能时，需要安装并登录 [Codex CLI](https://developers.openai.com/codex/cli/)
@@ -91,7 +91,7 @@ npm run dev
 Invoke-RestMethod http://127.0.0.1:43123/health
 ```
 
-`ok: true` 和 `service: "PaperLens AI bridge"` 表示 bridge 已启动。当前 Windows 适配覆盖开发启动、构建、Web 启动及下述 Office 转换；Codex 自动发现与调用、iPad USB 连接仍待单独适配和验证。因此 `providers.local-codex.available: false` 或 `USB: waiting…` 不代表网页启动失败，启动检查也不需要登录 AI 账户。
+`ok: true` 和 `service: "PaperLens AI bridge"` 表示 bridge 已启动。Windows 适配覆盖开发启动、构建、Web 启动及下述本机 Codex 接入和 Office 转换；iPad USB 连接仍待单独适配和验证。`providers.local-codex.available: false` 或 `USB: waiting…` 不代表网页启动失败，启动检查也不需要登录 AI 账户。
 
 在运行服务的窗口按 `Ctrl+C` 停止本次启动的服务。开发参数通过 `--` 转发，例如 `npm run dev -- --port 3001`。项目目录可以包含空格或中文。
 
@@ -106,7 +106,36 @@ npm run start -- --hostname localhost
 
 如果 PowerShell 提示无法加载 `npm.ps1`，可在上述命令中把 `npm` 换成 `npm.cmd`，无需修改系统执行策略。
 
-#### Windows Word/PPT 转换
+### Windows 本机 Codex
+
+安装 Codex CLI 后，先在终端确认版本和登录状态。npm 安装可使用以下命令，避免 PowerShell 的 `.ps1` 执行策略影响检查：
+
+```powershell
+codex.cmd --version
+codex.cmd login status
+# 如果尚未登录，再运行 codex.cmd login
+```
+
+PaperLens 优先使用 `PAPERLENS_CODEX_PATH`，否则搜索 PATH。Windows 支持 PATH 中的 `codex.exe` 和标准 npm 安装的 `codex.cmd` / `codex.ps1`；npm 包装入口会解析到 `@openai/codex/bin/codex.js`，再通过当前 Node 执行。提示词经标准输入发送，参数和图片路径独立传递，支持空格和中文路径。macOS 保留 PATH、ChatGPT 应用内 CLI 和 Homebrew 路径探测。
+
+若 CLI 不在 PATH 中，可在启动 PaperLens 的同一个 PowerShell 窗口指定绝对路径，或填写 `.env` 中的 `PAPERLENS_CODEX_PATH`：
+
+```powershell
+$env:PAPERLENS_CODEX_PATH = 'C:\Tools\Codex\codex.exe'
+npm run dev
+```
+
+也可指定标准 npm 的 `codex.cmd` 或 Codex 的 JavaScript 入口。显式路径无效时会报告错误；自定义 `.cmd` / `.bat` / `.ps1` 包装脚本需要改为指定实际可执行文件或 JavaScript 入口。修改 PATH 或环境变量后，重新打开终端并重启 PaperLens。
+
+```powershell
+(Invoke-RestMethod http://127.0.0.1:43123/health).providers.'local-codex'
+```
+
+`installed` 表示 CLI 通过版本检查，`loggedIn` 表示 `codex login status` 成功，`available` 需要两者均为真。健康检查最多缓存 10 秒；“测试连接”和本机 AI 请求会重新检查，因此登录后无需重启服务。`error` / `code` 会区分路径缺失、启动失败和未登录。登录检查不验证服务端额度或模型可用性，实际请求仍可能失败。PaperLens 复用 CLI 登录状态（遵循 `CODEX_HOME`），不会读取或复制凭据内容，也不会代为登录。
+
+翻译、术语和普通问答沿用 `--ignore-user-config`；仓库核实保留原来的搜索与配置行为。所有模式继续使用 `read-only` 和 `--ephemeral`。`paper-reader` Skill 可选；缺少该文件不会阻止 bridge 启动或模拟 CLI 测试。取消或超时会停止本次 CLI 及其子进程，等待退出后再清理图片临时文件。
+
+### Windows Word/PPT 转换
 
 从 [LibreOffice 官网](https://www.libreoffice.org/download/)安装 Windows 版本后重启 PaperLens。只阅读 PDF 时无需安装 LibreOffice。bridge 会先搜索 `PATH`，再检查 `ProgramW6432`、`ProgramFiles` 和 `ProgramFiles(x86)` 下的 `LibreOffice\program`，同一目录优先使用 `soffice.com`，其次为 `soffice.exe`。[LibreOffice 命令行说明](https://help.libreoffice.org/latest/en-US/text/shared/guide/start_parameters.html)建议 Windows 命令行任务使用 `soffice.com`。
 
@@ -153,22 +182,19 @@ curl http://127.0.0.1:43123/health
 npm run bridge
 ```
 
-### 启动兼容性检查
+### 兼容性检查
 
 ```bash
-npm run test:startup
-npm run test:office
-npm run build
-npm run test:startup-smoke
+npm test
 npm run typecheck
 npm run lint
 ```
 
-`test:startup` 使用独立模拟服务验证参数、中文／空格路径、失败处理和进程清理；`test:startup-smoke` 需要先构建，会启动真实开发／生产 Web 服务、检查页面和 bridge，再停止服务。两者均不会发起 AI 推理或文档转换。
+`npm test` 先构建再运行完整测试，包括 Office 模拟转换、启动检查、Codex 发现、登录状态、参数与图片传递、错误处理和进程清理。Codex 测试使用独立 JavaScript 模拟 CLI，不要求个人 Skill 或已登录的 AI 账户，也不会发起 AI 推理。真实翻译与问答需要单独验收。
 
 `test:office` 使用模拟转换进程，覆盖查找路径、错误输出、超时／取消、临时文件清理和 bridge 并发限制，无需安装 LibreOffice。安装真实 LibreOffice 后，可运行 `npm run test:office-smoke`，转换仓库内四种 Office 格式的样例，并用 PDF.js 检查页数、英文及中文文字；此命令在未检测到 LibreOffice 时会失败，不包含在默认 CI 中。样例说明见 [tests/fixtures/office/README.md](tests/fixtures/office/README.md)。
 
-GitHub Actions 在 Windows 和 macOS、Node.js 22 和 24 上执行上述检查，并将仓库放在带空格和中文的目录中。完整测试命令仍为 `npm test`；其中现有 Codex 模拟 CLI 测试使用 Unix shebang，页面源码测试还依赖个人目录的 `paper-reader/SKILL.md`，干净 Windows 环境仍可能因这两项前置条件失败。这些问题不属于本轮启动适配的通过项。
+GitHub Actions 在 Windows 和 macOS、Node.js 22 和 24 上执行上述检查，并将仓库放在带空格和中文的目录中。仍可单独运行 `npm run test:startup`；构建后运行 `npm run test:startup-smoke` 会启动真实开发／生产 Web 服务、检查页面和 bridge，再停止服务。
 
 ## 使用方式
 

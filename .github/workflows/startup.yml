@@ -1,4 +1,4 @@
-name: Startup compatibility
+name: Windows and macOS compatibility
 
 on:
   push:
@@ -30,9 +30,6 @@ jobs:
           cache: npm
           cache-dependency-path: PaperLens 中文 with spaces/package-lock.json
       - run: npm ci
-      - run: npm run test:startup
-      - run: npm run test:office
-      - run: npm run build
-      - run: npm run test:startup-smoke
+      - run: npm test
       - run: npm run typecheck
       - run: npm run lint
